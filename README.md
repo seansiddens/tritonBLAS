@@ -39,7 +39,7 @@ python3 example_matmul.py
 Borrows from performant variants of BLAS interfaces such as `hipBLASLt` and `cuBLASLt`, where the user initiates an initial call to set up some arguments and learn from the matrix descriptors before calling the actual `matmul`.
 
 ```python
-tritonblas.MatmulHeuristicResult(m, n, k) → MatmulHeuristicResult
+tritonblas.MatmulHeuristicResult(m, n, k, a_dtype, b_dtype, c_dtype) → MatmulHeuristicResult
 ```
 
 **Parameters:**
@@ -47,13 +47,16 @@ tritonblas.MatmulHeuristicResult(m, n, k) → MatmulHeuristicResult
 - **m** (*int*): Number of rows of the left-hand matrix.
 - **n** (*int*): Number of columns of the right-hand matrix.
 - **k** (*int*): Shared dimension between the two matrices (columns of the left-hand matrix and rows of the right-hand matrix).
+- **a_dtype** (*torch.dtype*): Data type of left-hand matrix.
+- **b_dtype** (*torch.dtype*): Data type of right-hand matrix.
+- **c_dtype** (*torch.dtype*): Data type of output matrix.
 
 **Returns:**
 
 - `MatmulHeuristicResult`: An object containing a precomputed kernel configuration optimized for the provided matrix dimensions.
 
 ```python
-tritonblas.matmul_lt(input,other,*,out=None,selector) → Tensor
+tritonblas.matmul_lt(input,other,*,out=None,selector,enable_streamk=False) → Tensor
 ```
 
 #### Parameters
@@ -65,13 +68,14 @@ tritonblas.matmul_lt(input,other,*,out=None,selector) → Tensor
 
 - **out** (*Tensor*, optional) – the output tensor.
 - **selector** (*MatmulHeuristicResult*): Configuration object returned by `MatmulHeuristicResult`, providing optimal tiling and launch parameters.
+- **enable_streamk** (*bool*, optional) – enable [Stream-K](https://arxiv.org/abs/2301.03598) GEMM algorithm. Default: `False`.
 
 ### Drop-in Replacement for `torch.matmul` (work-in-progress)
 
 Borrows from familiar pytorch API (`torch.matmul`) making integration within larger models and applications seamless.
 
 ```python
-tritonblas.matmul(input,other,*,out=None) → Tensor
+tritonblas.matmul(input,other,*,out=None,enable_streamk=False) → Tensor
 ```
 
 **Parameters**
@@ -82,6 +86,7 @@ tritonblas.matmul(input,other,*,out=None) → Tensor
 **Keyword Arguments**
 
 - **out** (*Tensor*, optional) – the output tensor.
+- **enable_streamk** (*bool*, optional) – enable [Stream-K](https://arxiv.org/abs/2301.03598) GEMM algorithm. Default: `False`.
 
 ## Support Matrix
 

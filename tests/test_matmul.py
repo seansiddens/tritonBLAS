@@ -30,7 +30,13 @@ import tritonblas
         ("N", "T"),  # A @ B^T
     ],
 )
-def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB):
+@pytest.mark.parametrize(
+    "enable_streamk", 
+    [
+        False, True,
+    ],
+)
+def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     
     # Adjust dimensions for transposition and apply tensor.T if needed
     if transA == "T":
@@ -58,7 +64,7 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB):
     bias = torch.zeros((m,), device="cuda", dtype=out_dtype)
 
     # Run TritonBLAS matmul
-    tritonblas.matmul(A, B, C)
+    tritonblas.matmul(A, B, C, enable_streamk)
 
     # Check correctnes: Fix tolerance later
     torch_c = torch.matmul(A, B)

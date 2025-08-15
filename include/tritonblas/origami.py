@@ -1,6 +1,21 @@
+import torch
 import itertools
 
 import origami
+
+# https://docs.pytorch.org/docs/stable/tensors.html
+dtype_to_str = {
+    torch.float32: "f32",
+    torch.complex64: "c32",
+    torch.complex128: "c64",
+    torch.float64: "f64",
+    torch.float16: "f16",
+    torch.int32: "i32",
+    torch.bfloat16: "bf16",
+    torch.int8: "i8",
+    torch.float8_e5m2: "f8",
+    torch.float8_e4m3fn: "f8",
+}
 
 
 class MatmulHeuristicResult:
@@ -9,29 +24,33 @@ class MatmulHeuristicResult:
         m,
         n,
         k,
-        element_size_A=16,
-        element_size_B=16,
-        element_size_out=32,
+        a_dtype,
+        b_dtype,
+        c_dtype,
         MI_dim=None,
         mx_block_size=0,  # Number of MX datatype elements that share a scale
     ):
 
-        # Instantiate hardare information object
-        self.hardware = origami.getHardwareForDevice(0)
-        self.block_mn_range = [16, 32, 64, 128, 256]
-        self.block_k_range = [16, 32, 64]
-        # Infer Matrix Instruction Dimensions from datatypes
-        self.MI_dim = self._infer_matrix_instruction_dimensions(
-            element_size_A, element_size_B
-        )
         # Set Instance Variables
         self.m = m
         self.n = n
         self.k = k
+        
+        # Instantiate hardare information object
+        self.hardware = origami.getHardwareForDevice(0)
+        self.block_mn_range = [16, 32, 64, 128, 256]
+        self.block_k_range = [16, 32, 64]
+        
+        self.element_size_A = torch.finfo(a_dtype).bits
+        self.element_size_B = torch.finfo(b_dtype).bits
+        self.element_size_out = torch.finfo(c_dtype).bits
+        self.mi_dtype = dtype_to_str.get(c_dtype)
+        
+        # Infer Matrix Instruction Dimensions from datatypes
+        self.MI_dim = self._infer_matrix_instruction_dimensions(
+            self.element_size_A, self.element_size_B
+        )
 
-        self.element_size_A = element_size_A
-        self.element_size_B = element_size_B
-        self.element_size_out = element_size_out
         self.kernel_occupancy = [1]  # Number of WG possibly co-resident in a CU
         self.mx_block_size = mx_block_size
 
@@ -137,6 +156,7 @@ class MatmulHeuristicResult:
             self.element_size_A,  # Element Size A
             self.element_size_B,  # Element Size B
             self.element_size_out,  # Element Size Out
+            origami.string_to_datatype(self.mi_dtype), # MI Data Type
             self.mx_block_size,  # MX Block Size
             0.8,  # H_L2
             False,  # debug
