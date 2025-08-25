@@ -37,7 +37,7 @@ class MatmulHeuristicResult:
         self.k = k
         
         # Instantiate hardare information object
-        self.hardware = origami.getHardwareForDevice(0)
+        self.hardware = origami.get_hardware_for_device(0)
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64]
         
