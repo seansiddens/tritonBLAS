@@ -131,9 +131,6 @@ def bench_matmul(
             m, n, k, A.dtype, B.dtype, C.dtype
         )
         config = selector.get_config()
-        # leave below two for debug purpose.
-        # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, True) # Stream-K
-        # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, False) # Persistent
         matmul = lambda: tritonblas.matmul(A, B, C, enable_streamk=enable_streamk)
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
