@@ -11,11 +11,7 @@ def example_matmul(m, n, k):
     C = torch.zeros((m, n), device="cuda", dtype=torch.float16)
 
     # Run TritonBLAS matmul
-    selector = tritonblas.MatmulHeuristicResult(m, n, k, 
-                    torch.finfo(A.dtype).bits, # Element Size A in bits 
-                    torch.finfo(B.dtype).bits, # Element Size B in bits
-                    torch.finfo(C.dtype).bits # Element Size C in bits
-                )
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
     tritonblas.matmul_lt(A, B, C, selector)
 
     # Print result

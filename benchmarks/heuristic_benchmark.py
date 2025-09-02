@@ -17,12 +17,14 @@ def measure_heuristic_time(num_runs=100, m=512, n=512, k=512):
         list of float: Time in seconds for each run.
     """
     times = []
+    
+    x_dtype = torch.float16
 
     ##
     # Initial Time
     ##
     start_time = time.perf_counter()
-    selector = tritonblas.MatmulHeuristicResult(m, n, k)
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, x_dtype, x_dtype, x_dtype)
     end_time = time.perf_counter()
     times.append(end_time - start_time)
     # Cached Time

@@ -1,7 +1,22 @@
+import torch
 import itertools
 import origami
-
 from math import ceil
+
+# https://docs.pytorch.org/docs/stable/tensors.html
+dtype_to_str = {
+    torch.float32: "f32",
+    torch.complex64: "c32",
+    torch.complex128: "c64",
+    torch.float64: "f64",
+    torch.float16: "f16",
+    torch.int32: "i32",
+    torch.bfloat16: "bf16",
+    torch.int8: "i8",
+    torch.float8_e5m2: "f8",
+    torch.float8_e4m3fn: "f8",
+}
+
 
 class MatmulHeuristicResult:
     def __init__(
@@ -9,30 +24,34 @@ class MatmulHeuristicResult:
         m,
         n,
         k,
-        element_size_A=16,
-        element_size_B=16,
-        element_size_out=32,
+        a_dtype,
+        b_dtype,
+        c_dtype,
         MI_dim=None,
         mx_block_size=0,  # Number of MX datatype elements that share a scale
-        streamk=True
+        streamk=True,
     ):
 
-        # Instantiate hardare information object
-        self.hardware = origami.getHardwareForDevice(0)
-        self.block_mn_range = [16, 32, 64, 128, 256]
-        self.block_k_range = [16, 32, 64]
-        # Infer Matrix Instruction Dimensions from datatypes
-        self.MI_dim = self._infer_matrix_instruction_dimensions(
-            element_size_A, element_size_B
-        )
         # Set Instance Variables
         self.m = m
         self.n = n
         self.k = k
 
-        self.element_size_A = element_size_A
-        self.element_size_B = element_size_B
-        self.element_size_out = element_size_out
+        # Instantiate hardare information object
+        self.hardware = origami.get_hardware_for_device(0)
+        self.block_mn_range = [16, 32, 64, 128, 256]
+        self.block_k_range = [16, 32, 64]
+
+        self.element_size_A = torch.finfo(a_dtype).bits
+        self.element_size_B = torch.finfo(b_dtype).bits
+        self.element_size_out = torch.finfo(c_dtype).bits
+        self.mi_dtype = dtype_to_str.get(c_dtype)
+
+        # Infer Matrix Instruction Dimensions from datatypes
+        self.MI_dim = self._infer_matrix_instruction_dimensions(
+            self.element_size_A, self.element_size_B
+        )
+
         self.kernel_occupancy = [1]  # Number of WG possibly co-resident in a CU
         self.mx_block_size = mx_block_size
 
@@ -40,7 +59,7 @@ class MatmulHeuristicResult:
         if streamk:
             self.grid = self.compute_sk_grid()
         else:
-            self.grid=self.hardware.N_CU
+            self.grid = self.hardware.N_CU
 
     def _infer_matrix_instruction_dimensions(self, element_size_A, element_size_B):
         """
@@ -142,6 +161,7 @@ class MatmulHeuristicResult:
             self.element_size_A,  # Element Size A
             self.element_size_B,  # Element Size B
             self.element_size_out,  # Element Size Out
+            origami.string_to_datatype(self.mi_dtype),  # MI Data Type
             self.mx_block_size,  # MX Block Size
             0.8,  # H_L2
             False,  # debug
@@ -173,7 +193,7 @@ class MatmulHeuristicResult:
         return tileSize * sk_grid
         """
         # get the macro-tile dims you already compute
-        BLK_M, BLK_N, _,GSIZE = self.get_config()
+        BLK_M, BLK_N, _, GSIZE = self.get_config()
 
         # bytes per C element
         bytes_per_elem = self.element_size_out // 8
@@ -188,24 +208,31 @@ class MatmulHeuristicResult:
         """
         Implements the dynamic‐grid mode logic
         """
-        config=self.config
+        config = self.config
         cu_count = self.hardware.N_CU
         BLK_M = config[0]
         BLK_N = config[1]
         BLK_K = config[2]
         # Fallback if no better fractional split is found
-        tiles = ceil(self.m/BLK_M) * ceil(self.n/BLK_N)
+        tiles = ceil(self.m / BLK_M) * ceil(self.n / BLK_N)
         sk_grid = tiles
-        iters_per_tile = max(1, ceil(self.k/BLK_K))
+        iters_per_tile = max(1, ceil(self.k / BLK_K))
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
             virt_cu_count = cu_count
-            #if size_mapping.CUOccupancy > 1:
-                #virt_cu_count *= size_mapping.CUOccupancy
+            # if size_mapping.CUOccupancy > 1:
+            # virt_cu_count *= size_mapping.CUOccupancy
 
             # Try these fractional denominators in order
-            tile_fractions = [0.0, 1.0/2.0, 1.0/8.0, 1.0/5.0, 1.0/4.0, 1.0/3.0]
+            tile_fractions = [
+                0.0,
+                1.0 / 2.0,
+                1.0 / 8.0,
+                1.0 / 5.0,
+                1.0 / 4.0,
+                1.0 / 3.0,
+            ]
             min_even_tiles = tiles / virt_cu_count
 
             for frac in tile_fractions:
@@ -213,8 +240,10 @@ class MatmulHeuristicResult:
                 frac_grid = int((tiles / (min_even_tiles + frac)) + 0.5)
 
                 # Skip if this split leaves a remainder AND workspace is too large
-                if (tiles % frac_grid != 0 and
-                    self.partial_tile_size(frac_grid) > 128 * 1024 * 1024):
+                if (
+                    tiles % frac_grid != 0
+                    and self.partial_tile_size(frac_grid) > 128 * 1024 * 1024
+                ):
                     continue
 
                 # Accept the first grid no larger than the virtual CU count
@@ -235,7 +264,7 @@ class MatmulHeuristicResult:
 
         # Final check: if the chosen grid leaves a remainder AND
         # workspace exceeds what the problem allows, fall back to no split
-        if (tiles % sk_grid != 0):
+        if tiles % sk_grid != 0:
             sk_grid = tiles
 
         return sk_grid

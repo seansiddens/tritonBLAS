@@ -127,13 +127,13 @@ def bench_matmul(
 
         # Build a tritonBLAS selector config and launch matmul_lt
         selector = tritonblas.MatmulHeuristicResult(
-            m, n, k, A.element_size() * 8, B.element_size() * 8, C.element_size() * 8
+            m, n, k, A.dtype, B.dtype, C.dtype
         )
         config = selector.get_config()
         # leave below two for debug purpose.
-        # matmul = lambda: tritonblas.streamk_matmul_lt(A, B, C, selector)
-        # matmul = lambda: tritonblas.persistent_matmul_lt(A, B, C, selector)
-        matmul = lambda: tritonblas.matmul(A, B, C)
+        # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, True) # Stream-K
+        # matmul = lambda: tritonblas.matmul_lt(A, B, C, selector, False) # Persistent
+        matmul = lambda: tritonblas.matmul(A, B, C) # Persistent
         ms = triton.testing.do_bench(matmul, warmup=20, rep=20)
         perf = gflops(ms)
 
