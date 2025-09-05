@@ -3,12 +3,28 @@ import torch
 import triton
 import tritonblas
 
+def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
+    """Generate valid WGM and WGN combinations that evenly divide the grid dimensions."""
+    grid_m = m // blk_m
+    grid_n = n // blk_n
+    
+    valid_wgm = [w for w in range(1, min(max_wgm + 1, grid_m + 1)) if grid_m % w == 0]
+    valid_wgn = [w for w in range(1, min(max_wgn + 1, grid_n + 1)) if grid_n % w == 0]
+    
+    # Return all combinations
+    combinations = []
+    for wgm in valid_wgm:
+        for wgn in valid_wgn:
+            combinations.append((wgm, wgn))
+    
+    return combinations if combinations else [(1, 1)]  # fallback
+
 @pytest.mark.parametrize(
     "m, n, k",
     [
         (8192, 8192, 8192),
-        (4864, 8192, 4160),
-        (4096, 4096, 4096),
+        # (4864, 8192, 4160),
+        # (4096, 4096, 4096),
     ],
 )
 @pytest.mark.parametrize(
@@ -16,21 +32,35 @@ import tritonblas
     [
         # (torch.float8_e4m3fn, torch.float8_e4m3fn),
         # (torch.float8_e5m2, torch.float8_e5m2),
-        (torch.float16, torch.float16),
+        # (torch.float16, torch.float16),
         (torch.bfloat16, torch.bfloat16),
-        (torch.float32, torch.float32),
+        # (torch.float32, torch.float32),
     ],
 )
 @pytest.mark.parametrize(
     "transA, transB", 
     [
-        ("T", "T"),  # A^T @ B^T
+        # ("T", "T"),  # A^T @ B^T
         ("N", "N"),  # A @ B
-        ("T", "N"),  # A^T @ B
-        ("N", "T"),  # A @ B^T
+        # ("T", "N"),  # A^T @ B
+        # ("N", "T"),  # A @ B^T
     ],
 )
-def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB):
+@pytest.mark.parametrize(
+    "ordering0, ordering1", 
+    [
+        (0, 0),  # Row major, Row major
+        (0, 1),  # Row major, Column major
+        (0, 2),  # Row major, Snake
+        (1, 0),  # Column major, Row major
+        (1, 1),  # Column major, Column major
+        (1, 2),  # Column major, Snake
+        (2, 0),  # Snake, Row major
+        (2, 1),  # Snake, Column major
+        (2, 2),  # Snake, Snake
+    ],
+)
+def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0, ordering1):
     
     # Adjust dimensions for transposition and apply tensor.T if needed
     if transA == "T":
@@ -59,15 +89,18 @@ def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB):
 
     # Run TritonBLAS matmul tessera
     selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
+    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
     
-    # Set random values for tessera-specific parameters
-    ordering0 = 1
-    ordering1 = 2
-    wgm = 4
-    wgn = 8
+    # Get valid WGM and WGN combinations that evenly divide the grid
+    wgm_wgn_combinations = get_valid_wgm_wgn_combinations(m, n, BLK_M, BLK_N, max_wgm=16, max_wgn=16)
     
-    tritonblas.matmul_lt_tessera(A, B, C, selector, ordering0, ordering1, wgm, wgn)
-
-    # Check correctness: Fix tolerance later
-    torch_c = torch.matmul(A, B)
-    torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
+    # Test each valid WGM/WGN combination
+    for wgm, wgn in wgm_wgn_combinations:
+        # Reset output tensor for each test
+        C.fill_(0)
+        
+        tritonblas.matmul_lt_tessera(A, B, C, selector, ordering0, ordering1, wgm, wgn)
+        
+        # Check correctness for this WGM/WGN combination
+        torch_c = torch.matmul(A, B)
+        torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)

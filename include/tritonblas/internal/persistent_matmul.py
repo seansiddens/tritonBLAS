@@ -1,5 +1,6 @@
 import triton
 import triton.language as tl
+from .tessera.tessera import transform_quantized
 import torch
 
 
@@ -118,7 +119,6 @@ def persistent_matmul(
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
-
 @triton.jit()
 def persistent_matmul_tessera(
     A,
@@ -138,7 +138,10 @@ def persistent_matmul_tessera(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
+    ordering0: tl.constexpr,
+    ordering1: tl.constexpr,
+    wgm: tl.constexpr,
+    wgn: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
@@ -162,12 +165,9 @@ def persistent_matmul_tessera(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        transformed_pid = transform_quantized(tile_id, num_pid_m, num_pid_n, ordering0, ordering1, wgm, wgn)
+        pid_m = transformed_pid // num_pid_n
+        pid_n = transformed_pid % num_pid_n
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
