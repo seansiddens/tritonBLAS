@@ -3,7 +3,7 @@ import triton
 import random
 import functools
 import time
-from .internal.persistent_matmul import persistent_matmul
+from .internal.persistent_matmul import persistent_matmul, persistent_matmul_tessera
 from .internal.streamk_matmul import streamk_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
@@ -62,6 +62,66 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
 
     # TODO: Support other matmul algs.
     kk = persistent_matmul[(grids,)](
+        a,
+        b,
+        c,
+        None,  # TODO: Enable bias.
+        M,
+        N,
+        K,
+        a.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        0,  # TODO: Enable bias stride.
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=total_programs,
+        NUM_XCDS=8,
+        BIAS=False,
+        EVEN_K=even_k,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return c
+
+def persistent_matmul_lt_tessera(
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, ordering0: int, ordering1: int, wgm: int, wgn: int
+):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
+
+    # TODO: Separate these configs.
+    # basica configs for most of compute bound sizes
+    # TODO: set these values analytically?
+    num_stages = 2
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+
+    # Run in Data-parallel mode.
+    grids = total_tiles
+
+    # TODO: Support other matmul algs.
+    kk = persistent_matmul_tessera[(grids,)](
         a,
         b,
         c,
@@ -201,3 +261,8 @@ def matmul(
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
+
+def matmul_lt_tessera(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, ordering0: int, ordering1: int, wgm: int, wgn: int):
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    return persistent_matmul_lt_tessera(a, b, c, selector, ordering0, ordering1, wgm, wgn)
