@@ -1,0 +1,642 @@
+{
+  "metadata": {
+    "matrix_dimensions": {
+      "m": 1024,
+      "n": 1024,
+      "k": 1024
+    },
+    "block_dimensions": {
+      "BLK_M": 64,
+      "BLK_N": 64,
+      "BLK_K": 64
+    },
+    "grid": {
+      "num_pid_m": 16,
+      "num_pid_n": 16
+    },
+    "total_combinations": 576,
+    "orderings_tested": [
+      "ROW_MAJOR",
+      "COLUMN_MAJOR",
+      "SNAKE"
+    ]
+  },
+  "sweep_results": [
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 111.33297871689138,
+      "tflops_ref": 112.17710358219242,
+      "ms": 0.019288836719808206,
+      "ms_ref": 0.01914368957143321,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 111.86135699430004,
+      "tflops_ref": 112.87255151703859,
+      "ms": 0.019197725699943245,
+      "ms_ref": 0.01902573849122059,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 109.8005686465125,
+      "tflops_ref": 111.54538705034872,
+      "ms": 0.01955803758096665,
+      "ms_ref": 0.019252106293115294,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 112.38544069323622,
+      "tflops_ref": 113.16216843035646,
+      "ms": 0.019108201513946134,
+      "ms_ref": 0.01897704575466516,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 112.29590316589484,
+      "tflops_ref": 113.22840113620603,
+      "ms": 0.019123437164288357,
+      "ms_ref": 0.018965945173214305,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 111.5287893155505,
+      "tflops_ref": 113.10351884902295,
+      "ms": 0.0192549713950905,
+      "ms_ref": 0.018986886260069273,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 110.98045311607152,
+      "tflops_ref": 111.31448682476613,
+      "ms": 0.019350107047715906,
+      "ms_ref": 0.019292041038473446,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 110.59577007013668,
+      "tflops_ref": 111.8169762120919,
+      "ms": 0.019417412136450853,
+      "ms_ref": 0.019205345384467398,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 1,
+      "tflops": 110.68260419543756,
+      "tflops_ref": 111.72111262213375,
+      "ms": 0.019402178541156164,
+      "ms_ref": 0.019221824752706132,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 110.2575851017438,
+      "tflops_ref": 113.56483551634885,
+      "ms": 0.019476969734266707,
+      "ms_ref": 0.018909758801973937,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 110.64660682602751,
+      "tflops_ref": 112.9598420211097,
+      "ms": 0.019408490776192923,
+      "ms_ref": 0.019011036219390983,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 110.86810781625127,
+      "tflops_ref": 113.42685141431065,
+      "ms": 0.01936971497303048,
+      "ms_ref": 0.0189327625797877,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 109.7178812091853,
+      "tflops_ref": 111.8643444693342,
+      "ms": 0.01957277723861312,
+      "ms_ref": 0.019197213001044294,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 110.24678795546515,
+      "tflops_ref": 112.53144102982999,
+      "ms": 0.01947887723375205,
+      "ms_ref": 0.019083410186054063,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 110.29910763137313,
+      "tflops_ref": 112.0692314245534,
+      "ms": 0.019469637552980316,
+      "ms_ref": 0.01916211631598202,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 109.40660872214947,
+      "tflops_ref": 112.79614860009242,
+      "ms": 0.01962846370143671,
+      "ms_ref": 0.019038625650364096,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 111.17750655259458,
+      "tflops_ref": 113.40515069825352,
+      "ms": 0.019315810496110496,
+      "ms_ref": 0.018936385470832692,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 2,
+      "tflops": 108.38137164714112,
+      "tflops_ref": 111.60996469168056,
+      "ms": 0.019814139785862786,
+      "ms_ref": 0.01924096700444592,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 102.85123817562892,
+      "tflops_ref": 111.17996733497615,
+      "ms": 0.02087951186676969,
+      "ms_ref": 0.01931538297299375,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 101.42011014404977,
+      "tflops_ref": 110.57080525963504,
+      "ms": 0.02117414036476464,
+      "ms_ref": 0.019421796223310674,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 102.27317654054795,
+      "tflops_ref": 111.18109208248309,
+      "ms": 0.02099752565276579,
+      "ms_ref": 0.0193151875717035,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 103.23032495329983,
+      "tflops_ref": 111.3994630004146,
+      "ms": 0.02080283723771572,
+      "ms_ref": 0.01927732495435824,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 102.61732181857336,
+      "tflops_ref": 113.61669172517738,
+      "ms": 0.020927106749060696,
+      "ms_ref": 0.018901128129962256,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 103.75911069545391,
+      "tflops_ref": 111.96524854910113,
+      "ms": 0.02069682010192951,
+      "ms_ref": 0.019179912301612447,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 103.01626653375517,
+      "tflops_ref": 111.12641822084538,
+      "ms": 0.020846063638855883,
+      "ms_ref": 0.019324690585565633,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 103.5220567858391,
+      "tflops_ref": 111.17514725439378,
+      "ms": 0.020744213500728637,
+      "ms_ref": 0.0193162204056818,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 3,
+      "tflops": 104.11244329245399,
+      "tflops_ref": 112.19478164924337,
+      "ms": 0.020626580071391412,
+      "ms_ref": 0.019140673179557657,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 108.46980206368805,
+      "tflops_ref": 110.57284514954361,
+      "ms": 0.019797986233432093,
+      "ms_ref": 0.01942143792262601,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 109.93229876333788,
+      "tflops_ref": 111.83896574068008,
+      "ms": 0.019534601497082308,
+      "ms_ref": 0.019201569272192208,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 109.11117852622664,
+      "tflops_ref": 111.25319319546647,
+      "ms": 0.019681609868083472,
+      "ms_ref": 0.019302669760021856,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 112.5676164648365,
+      "tflops_ref": 113.94721973838344,
+      "ms": 0.019077277421707013,
+      "ms_ref": 0.01884630140981504,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 111.59987567825804,
+      "tflops_ref": 111.4244521017379,
+      "ms": 0.019242706454182672,
+      "ms_ref": 0.019273001639166287,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 111.48952049924199,
+      "tflops_ref": 112.97696133044415,
+      "ms": 0.019261753377211813,
+      "ms_ref": 0.019008155492152654,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 110.09977582710503,
+      "tflops_ref": 113.05061627529653,
+      "ms": 0.019504886652742113,
+      "ms_ref": 0.018995771263825133,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 109.67649903691024,
+      "tflops_ref": 111.73321552025446,
+      "ms": 0.019580162266825196,
+      "ms_ref": 0.019219742652181297,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 4,
+      "tflops": 108.80909685977055,
+      "tflops_ref": 111.54049956509522,
+      "ms": 0.019736251011876364,
+      "ms_ref": 0.019252949882537732,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 108.70992539551764,
+      "tflops_ref": 111.992541411273,
+      "ms": 0.01975425555842158,
+      "ms_ref": 0.019175238109060695,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 102.09755222262045,
+      "tflops_ref": 109.65729516422309,
+      "ms": 0.021033644796081698,
+      "ms_ref": 0.019583591267538763,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 103.24858372000277,
+      "tflops_ref": 111.60021297459042,
+      "ms": 0.02079915840612116,
+      "ms_ref": 0.019242648295742477,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 101.51999534746848,
+      "tflops_ref": 111.76016369184002,
+      "ms": 0.021153307194803274,
+      "ms_ref": 0.019215108291370506,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 102.78072824958262,
+      "tflops_ref": 111.32166634606759,
+      "ms": 0.020893835688586108,
+      "ms_ref": 0.019290796827673064,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 100.83182588070916,
+      "tflops_ref": 111.68931763686597,
+      "ms": 0.021297676891625643,
+      "ms_ref": 0.019227296696198697,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 104.59861627187844,
+      "tflops_ref": 112.69012638398546,
+      "ms": 0.020530708001128266,
+      "ms_ref": 0.01905653775453731,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 106.78271560916343,
+      "tflops_ref": 112.23176348207484,
+      "ms": 0.02011077949974627,
+      "ms_ref": 0.019134366077594302,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 5,
+      "tflops": 103.85312606416436,
+      "tflops_ref": 112.27263948137494,
+      "ms": 0.020678083841917324,
+      "ms_ref": 0.019127399675646254,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 111.80162245980598,
+      "tflops_ref": 113.3281763245228,
+      "ms": 0.01920798286064271,
+      "ms_ref": 0.018949247377373628,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 113.6721360184383,
+      "tflops_ref": 112.54315480767481,
+      "ms": 0.018891908986839706,
+      "ms_ref": 0.019081423936176647,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 111.45503701550638,
+      "tflops_ref": 113.05727941676143,
+      "ms": 0.01926771284191694,
+      "ms_ref": 0.01899465172944558,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 112.49313333843408,
+      "tflops_ref": 113.60394037046406,
+      "ms": 0.01908990872837833,
+      "ms_ref": 0.018903249667194866,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 111.65805057865988,
+      "tflops_ref": 111.01598257822087,
+      "ms": 0.019232680822124506,
+      "ms_ref": 0.01934391425565145,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "COLUMN_MAJOR",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 111.06960714165483,
+      "tflops_ref": 109.55363161832682,
+      "ms": 0.0193345749864872,
+      "ms_ref": 0.019602121958691467,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 110.84893073405817,
+      "tflops_ref": 111.98010950660105,
+      "ms": 0.019373065971670114,
+      "ms_ref": 0.01917736692223371,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 112.40917930200827,
+      "tflops_ref": 110.20556246255349,
+      "ms": 0.019104166237442086,
+      "ms_ref": 0.01948616385610925,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "SNAKE",
+      "ordering_1": "SNAKE",
+      "WGM": 1,
+      "WGN": 6,
+      "tflops": 111.24517106203027,
+      "tflops_ref": 112.29691078168656,
+      "ms": 0.01930406171790202,
+      "ms_ref": 0.019123265573839924,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "ROW_MAJOR",
+      "WGM": 1,
+      "WGN": 7,
+      "tflops": 105.80442808844903,
+      "tflops_ref": 111.98758709959775,
+      "ms": 0.02029672752642048,
+      "ms_ref": 0.019176086418310853,
+      "number_of_errors": 0
+    },
+    {
+      "ordering_0": "ROW_MAJOR",
+      "ordering_1": "COLUMN_MAJOR",
+      "WGM": 1,
+      "WGN": 7,
+      "tflops": 102.26110188959775,
+      "tflops_ref": 112.4430908239497,
+      "ms": 0.021000004970789847,
+      "ms_ref": 0.019098404644197122,
+      "number_of_errors": 0
+    }
+  ]
+}
