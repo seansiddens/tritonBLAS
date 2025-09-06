@@ -1,6 +1,6 @@
 import triton
 import triton.language as tl
-from .tessera.tessera import transform_quantized
+from .tessera.tessera import transform
 import torch
 
 
@@ -165,7 +165,7 @@ def persistent_matmul_tessera(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        transformed_pid = transform_quantized(tile_id, num_pid_m, num_pid_n, ordering0, ordering1, wgm, wgn)
+        transformed_pid = transform(tile_id, num_pid_m, num_pid_n, ordering0, ordering1, wgm, wgn)
         pid_m = transformed_pid // num_pid_n
         pid_n = transformed_pid % num_pid_n
         tl.assume(pid_m >= 0)

@@ -22,8 +22,8 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
 @pytest.mark.parametrize(
     "m, n, k",
     [
-        (8192, 8192, 8192),
-        # (4864, 8192, 4160),
+        # (8192, 8192, 8192),
+        (4864, 8192, 4160),
         # (4096, 4096, 4096),
     ],
 )
