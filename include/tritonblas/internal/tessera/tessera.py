@@ -207,3 +207,62 @@ def transform_quantized(
     new_grid_y += level_y_idx * cumulative_y
     
     return new_grid_y * grid_x + new_grid_x
+
+@triton.jit()
+def transform(
+    index,
+    grid_y,
+    grid_x,
+    ordering0,
+    ordering1,
+    wgm,
+    wgn
+):
+    """
+    Transform index with quantized and non-quantized regions.
+    Handles cases where WGM and WGN don't evenly divide the grid.
+    
+    Args:
+        index: Input index
+        grid_y: Grid height
+        grid_x: Grid width
+        ordering0: Ordering for timestep level
+        ordering1: Ordering for L2 tile level
+        wgm: Workgroup M dimension
+        wgn: Workgroup N dimension
+    
+    Returns:
+        Transformed index in row-major 2D grid
+    """
+    # Calculate quantized dimensions
+    timestep_x_dim = wgn  # L2 tile width
+    timestep_y_dim = wgm  # L2 tile height
+    
+    temporal_x_count = grid_x // timestep_x_dim
+    temporal_y_count = grid_y // timestep_y_dim
+    
+    quantized_x = temporal_x_count * timestep_x_dim
+    quantized_y = temporal_y_count * timestep_y_dim
+    
+    non_quantized_x = grid_x - quantized_x
+    non_quantized_y = grid_y - quantized_y
+    
+    total_quantized_size = quantized_x * quantized_y
+    y_region_start = (total_quantized_size - 1) + (non_quantized_x * grid_y)
+    
+    # Check if index is in quantized region
+    if index <= total_quantized_size - 1:
+        # Quantized logic - use the existing transform_quantized function
+        return transform_quantized(index, grid_y, grid_x, ordering0, ordering1, wgm, wgn)
+    else:
+        # Non-quantized regions
+        if index > y_region_start:
+            # Un-quantized region Y
+            new_grid_x = ((index - total_quantized_size - (non_quantized_x * grid_y)) // non_quantized_y) % grid_x
+            new_grid_y = quantized_y + (index % non_quantized_y)
+            return new_grid_y * grid_x + new_grid_x
+        else:
+            # Un-quantized region X
+            new_grid_x = quantized_x + (index % non_quantized_x)
+            new_grid_y = ((index - total_quantized_size) // non_quantized_x) % grid_y
+            return (new_grid_y * grid_x) + new_grid_x
