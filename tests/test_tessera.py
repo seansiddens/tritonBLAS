@@ -52,12 +52,19 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
         (0, 0),  # Row major, Row major
         (0, 1),  # Row major, Column major
         (0, 2),  # Row major, Snake
+        (0, 3),  # Row major, Gilbert
         (1, 0),  # Column major, Row major
         (1, 1),  # Column major, Column major
         (1, 2),  # Column major, Snake
+        (1, 3),  # Column major, Gilbert
         (2, 0),  # Snake, Row major
         (2, 1),  # Snake, Column major
         (2, 2),  # Snake, Snake
+        (2, 3),  # Snake, Gilbert
+        (3, 0),  # Gilbert, Row major
+        (3, 1),  # Gilbert, Column major
+        (3, 2),  # Gilbert, Snake
+        (3, 3),  # Gilbert, Gilbert
     ],
 )
 def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0, ordering1):
