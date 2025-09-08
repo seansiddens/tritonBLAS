@@ -94,9 +94,7 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     return c
 
 
-def streamk_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, sk_grid=None
-):
+def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
