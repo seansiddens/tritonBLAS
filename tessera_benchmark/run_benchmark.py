@@ -11,6 +11,9 @@ import tritonblas
 import time
 import json
 import os
+import subprocess
+import pandas as pd
+import numpy as np
 
 def calculate_tflops(ms, m, n, k):
     """Calculate TFLOPS given elapsed time in ms and matrix dimensions."""
