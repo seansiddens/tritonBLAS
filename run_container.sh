@@ -71,3 +71,10 @@ else
     echo "  export PYTHONPATH=\$(pwd)/include/:\$PYTHONPATH"
     echo "  cd examples && python3 example_matmul.py"
 fi
+
+# Try this stuff if the above doesn't work:
+# apt-get update && apt-get install -y build-essential cmake ninja-build git
+# pip3 install -U nanobind scikit-build-core cmake ninja
+# python3 -c "import nanobind, sys; print('nanobind ok:', nanobind.__file__, sys.executable)"
+# rm -rf _origami
+# pip3 install --no-build-isolation -vvv -e .
