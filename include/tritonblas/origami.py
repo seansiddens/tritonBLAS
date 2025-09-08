@@ -1,6 +1,6 @@
 import torch
 import itertools
-
+from math import ceil
 import origami
 
 # https://docs.pytorch.org/docs/stable/tensors.html
@@ -35,17 +35,17 @@ class MatmulHeuristicResult:
         self.m = m
         self.n = n
         self.k = k
-        
+
         # Instantiate hardare information object
         self.hardware = origami.get_hardware_for_device(0)
         self.block_mn_range = [16, 32, 64, 128, 256]
         self.block_k_range = [16, 32, 64]
-        
+
         self.element_size_A = torch.finfo(a_dtype).bits
         self.element_size_B = torch.finfo(b_dtype).bits
         self.element_size_out = torch.finfo(c_dtype).bits
         self.mi_dtype = dtype_to_str.get(c_dtype)
-        
+
         # Infer Matrix Instruction Dimensions from datatypes
         self.MI_dim = self._infer_matrix_instruction_dimensions(
             self.element_size_A, self.element_size_B
@@ -156,7 +156,7 @@ class MatmulHeuristicResult:
             self.element_size_A,  # Element Size A
             self.element_size_B,  # Element Size B
             self.element_size_out,  # Element Size Out
-            origami.string_to_datatype(self.mi_dtype), # MI Data Type
+            origami.string_to_datatype(self.mi_dtype),  # MI Data Type
             self.mx_block_size,  # MX Block Size
             0.8,  # H_L2
             False,  # debug
@@ -174,3 +174,14 @@ class MatmulHeuristicResult:
 
     def get_config(self):
         return self.config
+
+    # Return Data Parallel Grid
+    def get_grid(self):
+
+        BLK_M = self.config[0]
+        BLK_N = self.config[1]
+        # Compute data parallel grid
+        grid_m = ceil(self.m / BLK_M)
+        grid_n = ceil(self.n / BLK_N)
+        # Return DP Grid
+        return grid_m * grid_n
