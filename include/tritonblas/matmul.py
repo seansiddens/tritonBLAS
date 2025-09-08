@@ -8,21 +8,33 @@ from .internal.streamk_matmul import streamk_matmul
 from .origami import MatmulHeuristicResult
 
 _tensor_cache = {}
+current_device_index = torch.cuda.current_device()
+current_device = torch.cuda.get_device_properties(current_device_index)
+MAX_SMS = current_device.multi_processor_count
+#TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
+MAX_BLOCK_SIZE = 65536
+
+# Global pre-allocated buffers
+_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
+_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 @functools.lru_cache(maxsize=1024)
-def _make_matmul_selector(M: int, N: int, K: int, 
-                          a_dtype: torch.dtype, 
-                          b_dtype: torch.dtype, 
-                          c_dtype: torch.dtype):
+def _make_matmul_selector(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    c_dtype: torch.dtype,
+):
     # Run Heuristic Results (Only if key has not been seen before)
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
 
 
-def persistent_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector
-):
+def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -80,10 +92,7 @@ def persistent_matmul_lt(
 
     return c
 
-def streamk_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
-    selector
-):
+def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -92,28 +101,18 @@ def streamk_matmul_lt(
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
-    iters_per_tile = triton.cdiv(K, BLK_K)
     total_tiles = total_blocks_M * total_blocks_N
     even_k = K % BLK_K == 0
 
-    if total_tiles >= selector.hardware.N_CU:
-        total_programs_streamk = selector.hardware.N_CU
-    else:
-        total_programs_streamk = total_tiles
+    ##
+    # Grid Size
+    ##
+    total_programs_streamk = selector.get_grid()
 
     if total_programs_streamk > 0:  # Stream-K
-        # last wave may occupy less than total_programs_streamk SMs
         total_tiles_streamk = total_tiles % total_programs_streamk
-        total_blocking_tiles = total_tiles - total_tiles_streamk
-        total_iters_streamk = total_tiles_streamk * iters_per_tile
-        total_full_tiles_streamk = total_iters_streamk // total_programs_streamk
-        total_partial_tiles_streamk = total_iters_streamk % total_programs_streamk
     else:  # all tiles are computed using classical blocking
-        total_blocking_tiles = total_tiles
         total_tiles_streamk = 0
-        total_full_tiles_streamk = 0
-        total_partial_tiles_streamk = 0
-        total_iters_streamk = 0
 
     num_stages = 2
     num_warps = 8
@@ -122,37 +121,21 @@ def streamk_matmul_lt(
     kpack = 1
 
     grids = total_programs_streamk
+    block_size = BLK_M * BLK_N
 
-    # Stream-K Specific Parameters
-    global _tensor_cache
-    if '_tensor_cache' not in globals():
-        _tensor_cache = {}
-
-    # Enhanced cache keys to avoid collisions
-    locks_key = (grids, id(torch.cuda.current_stream()))
-    P_key = (grids, BLK_M * BLK_N, id(torch.cuda.current_stream()))
-
-    if locks_key not in _tensor_cache:
-        _tensor_cache[locks_key] = torch.zeros((grids,), device="cuda", dtype=torch.uint8)
+    # Use global buffers with optimized zeroing
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
     else:
-        # Only zero the active portion
-        _tensor_cache[locks_key][:grids].zero_()
+        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
 
-    if P_key not in _tensor_cache:
-        _tensor_cache[P_key] = torch.zeros((grids, BLK_M * BLK_N), device="cuda", dtype=torch.float32)
-    else:
-        # Only zero the active portion
-        _tensor_cache[P_key][:grids, :BLK_M * BLK_N].zero_()
-
-    locks = _tensor_cache[locks_key]
-    P = _tensor_cache[P_key]
-
-    # TODO: Support other matmul algs.
     kk = streamk_matmul[(grids,)](
         a,
         b,
         c,
-        None, # TODO: Enable bias.
+        None,  # TODO: Enable bias.
         P,
         locks,
         M,
@@ -162,7 +145,7 @@ def streamk_matmul_lt(
         b.stride(1),
         c.stride(0),
         c.stride(1),
-        0, # TODO: Enable bias stride.
+        0,  # TODO: Enable bias stride.
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -183,8 +166,9 @@ def streamk_matmul_lt(
 
     return c
 
-def matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
-    selector, enable_streamk = False):
+def matmul_lt(
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
@@ -192,7 +176,8 @@ def matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
-def matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, enable_streamk = False):
+
+def matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, enable_streamk=False):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
