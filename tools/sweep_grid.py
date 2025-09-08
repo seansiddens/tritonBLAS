@@ -48,7 +48,7 @@ def parse_args():
     )
     p.add_argument("--warmup", type=int, default=10, help="Warmup iterations per grid")
     p.add_argument(
-        "--repeats", type=int, default=10, help="Timed repeats per grid (avg used)"
+        "--repeats", type=int, default=100, help="Timed repeats per grid (avg used)"
     )
     p.add_argument("--topk", type=int, default=10, help="How many top results to show")
     p.add_argument(
@@ -241,6 +241,7 @@ def main():
             elapsed = time_one_matmul(
                 tritonblas, a, b, c, sk, warmup=args.warmup, repeats=args.repeats
             )
+
             if elapsed is None:
                 print(f"sk={sk:4d}: FAILED (error during run).")
                 continue

@@ -1,7 +1,7 @@
 import torch
 import itertools
-from math import ceil
 import origami
+from math import ceil
 
 # https://docs.pytorch.org/docs/stable/tensors.html
 dtype_to_str = {
@@ -145,6 +145,7 @@ class MatmulHeuristicResult:
             False,  # debug
             False,  # Print
         )
+
         return results[1]
 
     def _get_best_tile_size(self):
@@ -168,13 +169,15 @@ class MatmulHeuristicResult:
             False,  # Print
             6,  # WGM
         )
+        print(results)
 
+        # print(results[:3])
         best_result = results[0]
 
         # Heuristic weightin to different tiles
         if self.hardware.N_CU == 304:
             if best_result[1] == 256 and best_result[2] == 256:
-                if results[0][0] * 1.00 > results[1][0]:
+                if results[0][0] * 1.05 > results[1][0]:
                     best_result = results[1]
 
         return (best_result[1], best_result[2], best_result[3])
@@ -273,14 +276,5 @@ class MatmulHeuristicResult:
         # workspace exceeds what the problem allows, fall back to no split
         if tiles % sk_grid != 0:
             sk_grid = tiles
-
-        if tiles >= self.hardware.N_CU:
-            last_wave_remainder = tiles % self.hardware.N_CU
-            last_wave_occupancy = (tiles % self.hardware.N_CU) / self.hardware.N_CU
-
-            # Really bad last wave, which would have originally been compensated for
-            # by changing tile size, but triton tile sizes are limited
-            if last_wave_remainder < 128:
-                sk_grid = 256
 
         return sk_grid

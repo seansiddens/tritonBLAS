@@ -9,15 +9,13 @@ from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
-current_device_index = torch.cuda.current_device()
-current_device = torch.cuda.get_device_properties(current_device_index)
-MAX_SMS = current_device.multi_processor_count
-# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
+MAX_SMS = 304
+# 256x256 may need adjust when using fp8/fp4
 MAX_BLOCK_SIZE = 65536
 
 # Global pre-allocated buffers
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+_global_locks = torch.zeros(MAX_SMS, device="cuda", dtype=torch.uint8)
+_global_P = torch.zeros(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -94,9 +92,7 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     return c
 
 
-def streamk_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, sk_grid=None
-):
+def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -105,27 +101,50 @@ def streamk_matmul_lt(
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
+    iters_per_tile = triton.cdiv(K, BLK_K)
     total_tiles = total_blocks_M * total_blocks_N
     even_k = K % BLK_K == 0
 
     ##
     # Grid Size
     ##
-    total_programs_streamk = selector.get_grid()
+    if total_tiles >= selector.hardware.N_CU:
+        total_programs_streamk = selector.get_grid()
+
+        last_wave_occupancy = (
+            total_tiles % selector.hardware.N_CU
+        ) / selector.hardware.N_CU
+
+        # Really bad last wave, which would have originally been compensated for
+        # by changing tile size, but triton tile sizes are limited
+        if last_wave_occupancy < 0.3:
+            num_timesteps = triton.cdiv(total_tiles, selector.hardware.N_CU)
+            total_programs_streamk = 256
+            # print(total_programs_streamk)
+            # total_programs_streamk = total_tiles // num_timesteps
+
+    else:
+        total_programs_streamk = selector.get_grid()
 
     if total_programs_streamk > 0:  # Stream-K
+        # last wave may occupy less than total_programs_streamk SMs
         total_tiles_streamk = total_tiles % total_programs_streamk
+        total_blocking_tiles = total_tiles - total_tiles_streamk
+        total_iters_streamk = total_tiles_streamk * iters_per_tile
+        total_full_tiles_streamk = total_iters_streamk // total_programs_streamk
+        total_partial_tiles_streamk = total_iters_streamk % total_programs_streamk
     else:  # all tiles are computed using classical blocking
+        total_blocking_tiles = total_tiles
         total_tiles_streamk = 0
+        total_full_tiles_streamk = 0
+        total_partial_tiles_streamk = 0
+        total_iters_streamk = 0
 
     num_stages = 2
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
-
-    if sk_grid != None:
-        total_programs_streamk = sk_grid
 
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
@@ -134,9 +153,13 @@ def streamk_matmul_lt(
     if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
         locks = _global_locks[:grids]
         P = _global_P[:grids, :block_size]
+
+        # Optimized zeroing - use fill_ which can be faster than zero_()
+        locks.fill_(0)
+        P.fill_(0.0)
     else:
-        locks = torch.empty(grids, device="cuda", dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device="cuda", dtype=torch.float32)
+        locks = torch.zeros(grids, device="cuda", dtype=torch.uint8)
+        P = torch.zeros(grids, block_size, device="cuda", dtype=torch.float32)
 
     kk = streamk_matmul[(grids,)](
         a,
@@ -185,19 +208,13 @@ def matmul_lt(
         return persistent_matmul_lt(a, b, c, selector)
 
 
-def matmul(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    enable_streamk=False,
-    sk_grid=None,
-):
+def matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, enable_streamk=False):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
+        return streamk_matmul_lt(a, b, c, selector)
     else:
         return persistent_matmul_lt(a, b, c, selector)
