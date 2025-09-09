@@ -14,12 +14,45 @@ import os
 import subprocess
 import pandas as pd
 import numpy as np
+import math
 
-def calculate_tflops(ms, m, n, k):
-    """Calculate TFLOPS given elapsed time in ms and matrix dimensions."""
-    return 2 * m * n * k * 1e-12 / (ms * 1e-3)
+def init_by_size_and_type(size, dtype, init_type):
+    """
+    Initialize a tensor of the given size and type using the specified initialization method.
 
-def benchmark_tessera_matmul(m, n, k, ordering0, ordering1, wgm, wgn, dtype=torch.float16, warmup=10, rep=100):
+    Args:
+        size (tuple): The size of the tensor to be initialized.
+        dtype (torch.dtype): The data type of the tensor.
+        init_type (str): The initialization method ('hpl', 'trig_float', 'zeros', 'randn').
+
+    Returns:
+        torch.Tensor: The initialized tensor.
+    """
+    if init_type == "hpl":
+        return torch.empty(size, device="cuda", dtype=dtype).uniform_(-0.5, 0.5)
+    elif init_type == "trig_float":
+        M, N = size
+        return (
+            torch.reshape(
+                torch.arange(0, M * N, device="cuda", dtype=torch.float32), (M, N)
+            )
+            .sin()
+            .to(dtype=dtype)
+        )
+    elif init_type == "zeros":
+        return torch.zeros(size, dtype=dtype, device="cuda")
+    elif init_type == "randn":
+        # Need to generate and then cast to support f8 (randn not supported for f8)
+        A = torch.randn(size, dtype=torch.float32, device="cuda")
+        return A.to(dtype)
+    else:
+        raise ValueError(f"Unsupported init_type: {init_type}")
+
+def benchmark_tessera_matmul(
+    m, n, k, 
+    ordering0, ordering1, 
+    wgm, wgn, 
+    dtype=torch.float16, warmup=10, rep=100, transA=False, transB=False):
     """
     Benchmark tessera matmul and compare with reference implementation.
     
@@ -40,66 +73,51 @@ def benchmark_tessera_matmul(m, n, k, ordering0, ordering1, wgm, wgn, dtype=torc
     print(f"  Workgroup: WGM={wgm}, WGN={wgn}")
     print(f"  Data type: {dtype}")
     print()
+
+    # Adjust dimensions for transposition and apply tensor.T if needed
+    if transA == "T":
+        A_size = (m, k)  # A is MxK
+    else:
+        A_size = (k, m)  # A is KxM (we will later transpose it with .T)
+
+    if transB == "T":
+        B_size = (k, n)  # B is KxN
+    else:
+        B_size = (n, k)  # B is NxK (we will later transpose it with .T)
+
+    # Initialize tensors with the appropriate dimensions
+    init_type = "randn"
+    A = init_by_size_and_type(A_size, dtype, init_type)
+    B = init_by_size_and_type(B_size, dtype, init_type)
     
-    # Create input matrices
-    A = torch.randn((m, k), device="cuda", dtype=dtype)
-    B = torch.randn((k, n), device="cuda", dtype=dtype)
     
     # Allocate output tensors
     C_tessera = torch.zeros((m, n), device="cuda", dtype=dtype)
     C_reference = torch.zeros((m, n), device="cuda", dtype=dtype)
+
+    # Compute performance metrics
+    flops = lambda: 2 * m * n * k * 1e-12
+    gflops = lambda ms: 2 * m * n * k * 1e-9 / (ms * 1e-3)
+    tflops = lambda ms: (2 * m * n * k * 1e-12) / (ms * 1e-3)
+    bytes_fn = lambda: (A.element_size() * ((m * k) + (n * k))) + (
+        (m * n) * C_tessera.element_size()
+    )
     
     # Create selector
     selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C_tessera.dtype)
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
-    
+
     print(f"  Block sizes: BLK_M={BLK_M}, BLK_N={BLK_N}, BLK_K={BLK_K}")
-    print(f"  Grid dimensions: {m//BLK_M} x {n//BLK_N}")
+    print(f"  Grid dimensions: {math.ceil(m/BLK_M)} x {math.ceil(n/BLK_N)}")
     print()
     
-    # Warmup
-    print("Warming up...")
-    for _ in range(warmup):
-        C_tessera.fill_(0)
-        tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
-    
-    # Benchmark tessera
-    start_event = torch.cuda.Event(enable_timing=True) # in milliseconds
-    end_event = torch.cuda.Event(enable_timing=True)
-    print("Benchmarking tessera matmul...")
-    timings = []
-    for _ in range(rep):
-        torch.cuda.synchronize()
-        start_event.record()
-        tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time = start_event.elapsed_time(end_event)
-        timings.append(elapsed_time)
-    
-    tessera_ms = sum(timings) / len(timings)
-    tessera_tflops = calculate_tflops(tessera_ms, m, n, k)
-    
-    # Benchmark reference
-    print("Benchmarking reference matmul...")
-    timings_ref = []
-    for _ in range(rep):
-        torch.cuda.synchronize()
-        start_event.record()
-        tritonblas.matmul_lt(A, B, C_reference, selector)
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time = start_event.elapsed_time(end_event)
-        timings_ref.append(elapsed_time)
-   
-
-    reference_ms = sum(timings_ref) / len(timings_ref)
-    reference_tflops = calculate_tflops(reference_ms, m, n, k)
+    tessera_matmul = lambda: tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn) 
+    tessera_ms = triton.testing.do_bench(tessera_matmul, warmup=20, rep=20)
+    tessera_tflops = tflops(tessera_ms)
     
     # Correctness check
     print("Checking correctness...")
     C_tessera.fill_(0)
-    C_reference.fill_(0)
     
     tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
     tritonblas.matmul_lt(A, B, C_reference, selector)
@@ -128,19 +146,17 @@ def benchmark_tessera_matmul(m, n, k, ordering0, ordering1, wgm, wgn, dtype=torc
         'wgn': wgn,
         'dtype': str(dtype),
         'tflops': tessera_tflops,
-        'tflops_ref': reference_tflops,
         'ms': tessera_ms,
-        'ms_ref': reference_ms,
-        'number_of_errors': significant_errors
+        'number_of_errors': significant_errors,
+        'transA': transA,
+        'transB': transB,
+        'init_type': init_type,
     }
     
     # Results for console output
     results = {
         'tessera_ms': tessera_ms,
         'tessera_tflops': tessera_tflops,
-        'reference_ms': reference_ms,
-        'reference_tflops': reference_tflops,
-        'speedup': reference_ms / tessera_ms,
         'max_diff': max_diff,
         'mean_diff': mean_diff,
         'correctness': correctness
@@ -153,14 +169,6 @@ def benchmark_tessera_matmul(m, n, k, ordering0, ordering1, wgm, wgn, dtype=torc
     print(f"Tessera MatMul:")
     print(f"  Time:     {tessera_ms:.3f} ms")
     print(f"  TFLOPS:   {tessera_tflops:.3f}")
-    print()
-    print(f"Reference MatMul:")
-    print(f"  Time:     {reference_ms:.3f} ms")
-    print(f"  TFLOPS:   {reference_tflops:.3f}")
-    print()
-    print(f"Performance:")
-    print(f"  Speedup:  {results['speedup']:.3f}x")
-    print(f"  Tessera is {'faster' if results['speedup'] > 1 else 'slower'}")
     print()
     print(f"Correctness:")
     print(f"  Status:   {correctness}")
@@ -186,8 +194,10 @@ def main():
     parser.add_argument("wgm", type=int, help="Workgroup M dimension")
     parser.add_argument("wgn", type=int, help="Workgroup N dimension")
     parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16", "float32"], help="Data type")
-    parser.add_argument("--warmup", type=int, default=10, help="Number of warmup iterations")
-    parser.add_argument("--rep", type=int, default=100, help="Number of benchmark iterations")
+    parser.add_argument("--warmup", type=int, default=50, help="Warmup time (in ms)")
+    parser.add_argument("--rep", type=int, default=50, help="Rep time (in ms)")
+    parser.add_argument("--transA", action="store_true")
+    parser.add_argument("--transB", action="store_true")
     
     args = parser.parse_args()
     
@@ -206,7 +216,9 @@ def main():
         args.wgm, args.wgn,
         dtype=dtype,
         warmup=args.warmup,
-        rep=args.rep
+        rep=args.rep,
+        transA=args.transA,
+        transB=args.transB
     )
     
     if results is None:
