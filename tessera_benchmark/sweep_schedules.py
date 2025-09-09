@@ -39,7 +39,7 @@ def get_ordering_name(ordering):
     names = {0: "ROW_MAJOR", 1: "COLUMN_MAJOR", 2: "SNAKE", 3: "SPIRAL", 4: "GILBERT"}
     return names.get(ordering, f"UNKNOWN_{ordering}")
 
-def calculate_tcc_hit_rate(csv_file, kernel_name='matmul_lt_tessera'):
+def calculate_tcc_hit_rate(csv_file, kernel_name='persistent_matmul_tessera'):
     """
     Calculate TCC hit rate from rocprof CSV output.
     Hit Rate = (100 * TCC_HIT_sum) / (TCC_HIT_sum + TCC_MISS_sum)
@@ -159,13 +159,7 @@ def run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
         profiler_data = None
         csv_file = "pmc_1/tessera_benchmark_counter_collection.csv"
         if os.path.exists(csv_file):
-            profiler_data = calculate_tcc_hit_rate(csv_file, 'matmul_lt_tessera')
-            if profiler_data is None:
-                # Try alternative kernel names
-                for kernel_name in ['matmul_lt', 'tritonblas_matmul', 'gemm_kernel']:
-                    profiler_data = calculate_tcc_hit_rate(csv_file, kernel_name)
-                    if profiler_data is not None:
-                        break
+            profiler_data = calculate_tcc_hit_rate(csv_file, 'persistent_matmul_tessera')
         else:
             print(f"Warning: rocprof CSV file not found: {csv_file}")
         
@@ -185,25 +179,6 @@ def run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
                     "number_of_errors": benchmark_data.get('number_of_errors', 0)
                 }
             }
-        elif benchmark_data:
-            # Return just benchmark data if profiler data is not available
-            return {
-                "profiler_data": None,
-                "benchmark_data": {
-                    "ordering_name_0": get_ordering_name(ordering0),
-                    "ordering_name_1": get_ordering_name(ordering1),
-                    "wgm": wgm,
-                    "wgn": wgn,
-                    "ms": benchmark_data.get('ms', 0),
-                    "tflops": benchmark_data.get('tflops', 0),
-                    "ms_ref": benchmark_data.get('ms_ref', 0),
-                    "tflops_ref": benchmark_data.get('tflops_ref', 0),
-                    "number_of_errors": benchmark_data.get('number_of_errors', 0)
-                }
-            }
-        else:
-            return None
-            
     except Exception as e:
         print(f"Error running benchmark: {e}")
         return None
@@ -298,7 +273,7 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
             if result is not None:
                 # Extract benchmark and profiler data
                 benchmark_data = result.get("benchmark_data", {})
-                profiler_data = result.get("profiler_data", {})
+                profiler_data = result["profiler_data"]
                 
                 # Add to sweep results
                 sweep_result = {
