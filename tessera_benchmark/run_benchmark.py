@@ -64,23 +64,36 @@ def benchmark_tessera_matmul(m, n, k, ordering0, ordering1, wgm, wgn, dtype=torc
         tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
     
     # Benchmark tessera
+    start_event = torch.cuda.Event(enable_timing=True) # in milliseconds
+    end_event = torch.cuda.Event(enable_timing=True)
     print("Benchmarking tessera matmul...")
-    def tessera_fn():
-        C_tessera.fill_(0)
+    timings = []
+    for _ in range(rep):
+        torch.cuda.synchronize()
+        start_event.record()
         tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
-        return C_tessera
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+        timings.append(elapsed_time)
     
-    tessera_ms = triton.testing.do_bench(tessera_fn, warmup=0, rep=rep)
+    tessera_ms = sum(timings) / len(timings)
     tessera_tflops = calculate_tflops(tessera_ms, m, n, k)
     
     # Benchmark reference
     print("Benchmarking reference matmul...")
-    def reference_fn():
-        C_reference.fill_(0)
+    timings_ref = []
+    for _ in range(rep):
+        torch.cuda.synchronize()
+        start_event.record()
         tritonblas.matmul_lt(A, B, C_reference, selector)
-        return C_reference
-    
-    reference_ms = triton.testing.do_bench(reference_fn, warmup=0, rep=rep)
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+        timings_ref.append(elapsed_time)
+   
+
+    reference_ms = sum(timings_ref) / len(timings_ref)
     reference_tflops = calculate_tflops(reference_ms, m, n, k)
     
     # Correctness check
