@@ -135,8 +135,8 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "50",
-            "--rep", "50"
+            "--warmup", "20",
+            "--rep", "20"
         ]
 
         # Benchmark first without 
@@ -159,15 +159,15 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "50",
-            "--rep", "50"
+            "--warmup", "20",
+            "--rep", "20"
         ]
         
-        print(f"Running: {' '.join(cmd)}")
+        print(f"Running: {' '.join(rocprof_cmd)}")
         rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
         
         if rocprof_result.returncode != 0:
-            print(f"Benchmark failed: {result.stderr}")
+            print(f"Benchmark failed: {rocprof_result.stderr}")
             return None
         
         # Analyze rocprof results to get TCC hit rate
@@ -188,7 +188,89 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
                     "wgm": wgm,
                     "wgn": wgn,
                     "tflops": benchmark_data.get('tflops', 0),
-                    "us": benchmark_data.get('us', 0),
+                    "ms": benchmark_data.get('ms', 0),
+                    "transA": benchmark_data["transA"],
+                    "transB": benchmark_data["transB"],
+                    "init_type": benchmark_data["init_type"]
+                }
+            }
+    except Exception as e:
+        print(f"Error running benchmark: {e}")
+        return None
+
+def run_baseline_benchmark(m, n, k, wgm, dtype="float16"):
+    """Run a single benchmark with rocprof profiling and return results."""
+    try:
+        # Create input file for rocprof
+        with open("input.txt", "w") as f:
+            f.write("pmc: TCC_HIT_sum TCC_MISS_sum\n")
+
+        # Run the benchmark script with rocprof
+        bench_cmd = [
+            sys.executable, "run_benchmark.py",
+            str(m), str(n), str(k),
+            "0", "0",
+            str(wgm), "1",
+            "--dtype", dtype,
+            "--warmup", "20",
+            "--rep", "20",
+            "--baseline"            
+        ]
+
+        # Benchmark first without 
+        print(f"Running: {' '.join(bench_cmd)}")
+        bench_result = subprocess.run(bench_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+
+        # Read the JSON results from run_benchmark.py
+        benchmark_data = None
+        try:
+            with open("benchmark_results.json", "r") as f:
+                benchmark_data = json.load(f)
+            print("loaded baseline data")
+        except Exception as e:
+            print(f"Error reading benchmark results: {e}")
+            return None
+
+        rocprof_cmd = [
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
+            sys.executable, "run_benchmark.py",
+            str(m), str(n), str(k),
+            "0", "0",
+            str(wgm), "1",
+            "--dtype", dtype,
+            "--warmup", "20",
+            "--rep", "20",
+            "--baseline"
+        ]
+        
+        print("Running with rocprof...") 
+        print(f"Running: {' '.join(rocprof_cmd)}")
+        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        
+        if rocprof_result.returncode != 0:
+            print(f"Benchmark failed: {rocprof_result.stderr}")
+            return None
+        
+        # Analyze rocprof results to get TCC hit rate
+        profiler_data = None
+        csv_file = "pmc_1/tessera_benchmark_counter_collection.csv"
+        if os.path.exists(csv_file):
+            profiler_data = calculate_tcc_hit_rate(csv_file, 'persistent_matmul')
+            print(json.dumps(profiler_data, indent=4))
+        else:
+            print(f"Warning: rocprof CSV file not found: {csv_file}")
+        
+        # Combine benchmark and profiler data
+        if benchmark_data and profiler_data:
+            return {
+                "profiler_data": profiler_data,
+                "benchmark_data": {
+                    "wgm": wgm,
+                    "tflops": benchmark_data.get('tflops', 0),
+                    "ms": benchmark_data.get('ms', 0),
+                    "transA": benchmark_data["transA"],
+                    "transB": benchmark_data["transB"],
+                    "init_type": benchmark_data["init_type"]
                 }
             }
     except Exception as e:
@@ -206,7 +288,7 @@ def save_progressive_results(results, csv_data, json_path, csv_path):
         with open(csv_path, 'w', newline='') as f:
             fieldnames = [
                 "ordering_0", "ordering_1", "WGM", "WGN", 
-                "tflops", "us", "number_of_errors", 
+                "tflops", "ms", "number_of_errors", 
                 "l2_hit_rate_pct"
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -228,9 +310,11 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
     num_pid_m = math.ceil(m / BLK_M)
     num_pid_n = math.ceil(n / BLK_N)
     wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
+    print(f"Num wgm/wgn combinations to test: {len(wgm_wgn_combinations)}")
     
     # All ordering combinations
     orderings = [0, 1, 2, 3]  # ROW_MAJOR, COLUMN_MAJOR, SNAKE, SPIRAL
+    print(f"Testing orderings: {[get_ordering_name(ord) for ord in orderings]}")
     ordering_combinations = [(o0, o1) for o0 in orderings for o1 in orderings]
     
     total_combinations = len(wgm_wgn_combinations) * len(ordering_combinations)
@@ -245,6 +329,49 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
     csv_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.csv"
     json_path = os.path.join(results_dir, json_filename)
     csv_path = os.path.join(results_dir, csv_filename)
+
+
+    # Get optimal baseline:
+    baseline_results = []
+    baseline_wgm_values = [1, 2, 4, 6, 8, 16]
+    print(f"Computing baseline perf for WGMs: {baseline_wgm_values}...")
+    for wgm in baseline_wgm_values:
+        if wgm > num_pid_m or wgm > num_pid_n:
+            break
+        baseline_results.append(run_baseline_benchmark(m, n, k, wgm))
+
+    optimal_l2_hit_rate = -1
+    optimal_tflops = -1
+    optimal_ms = -1
+    optimal_wgm = -1
+    for res in baseline_results:
+        profiler_data = res["profiler_data"]
+        benchmark_data = res["benchmark_data"]
+        if benchmark_data["wgm"] == gsize_m:
+            predicted_tflops = benchmark_data["tflops"]
+            predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
+            predicted_ms = benchmark_data["ms"]
+        
+        if benchmark_data["tflops"] > optimal_tflops:
+            optimal_wgm = benchmark_data["wgm"]
+            optimal_tflops = benchmark_data["tflops"]
+            optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
+            optimal_ms = benchmark_data["ms"]
+
+
+    baseline_data = {
+        "predicted_wgm": gsize_m, 
+        "predicted_tflops": predicted_tflops,
+        "predicted_l2_hit_rate": predicted_l2_hit_rate, 
+        "predicted_ms": predicted_l2_hit_rate, 
+        "optimal_wgm": optimal_wgm,
+        "optimal_tflops": optimal_tflops,
+        "optimal_ms": optimal_ms,
+        "optimal_l2_hit_rate": optimal_l2_hit_rate,
+    }
+
+    print("Baseline results: ")
+    print(json.dumps(baseline_data, indent=4))
     
     # Create metadata
     metadata = {
@@ -264,8 +391,11 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
         },
         "arch": arch,
         "total_combinations": total_combinations,
-        "orderings_tested": [get_ordering_name(o) for o in orderings]
+        "orderings_tested": [get_ordering_name(o) for o in orderings],
+        "baseline_data": baseline_data
     }
+
+            
     
     # Prepare results structure
     sweep_results = []
@@ -279,13 +409,14 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
         for ordering0, ordering1 in ordering_combinations:
             combination_count += 1
             print(f"  [{combination_count}/{total_combinations}] Ordering=({ordering0},{ordering1}), WGM={wgm}, WGN={wgn}")
+
             
             # Run benchmark
-            result = run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype)
+            result = run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype)
             
             if result is not None:
                 # Extract benchmark and profiler data
-                benchmark_data = result.get("benchmark_data", {})
+                benchmark_data = result["benchmark_data"]
                 profiler_data = result["profiler_data"]
                 
                 # Add to sweep results
@@ -295,11 +426,11 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
                     "WGM": wgm,
                     "WGN": wgn,
                     "tflops": benchmark_data.get("tflops", 0),
-                    "us": benchmark_data.get("us", 0),
+                    "ms": benchmark_data.get("ms", 0),
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
                     "transA": benchmark_data["transA"],
                     "transB": benchmark_data["transB"],
-                    "init_type": benchmark_data["init_type"]
+                    "init_type": benchmark_data["init_type"],
                     "profiler_data": profiler_data
                 }
                 sweep_results.append(sweep_result)
@@ -311,11 +442,13 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
                     "WGM": wgm,
                     "WGN": wgn,
                     "tflops": benchmark_data.get("tflops", 0),
-                    "us": benchmark_data.get("us", 0),
+                    "ms": benchmark_data.get("ms", 0),
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
                     "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
                 }
                 csv_data.append(csv_row)
+
+                print(json.dumps(result, indent=4))
             else:
                 print(f"    Failed to get results")
             
@@ -390,8 +523,7 @@ def main():
             break
         except Exception as e:
             print(f"Error processing problem {problem_idx+1}: {e}")
-            print("Continuing with next problem...")
-            continue
+            sys.exit(1)
     
     print(f"\nSweep completed! Results saved to {args.results_dir}/")
 
