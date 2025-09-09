@@ -280,7 +280,7 @@ class MatmulHeuristicResult:
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited
-            if last_wave_remainder < 128:
+            if last_wave_remainder < 128 and last_wave_remainder > 0:
                 sk_grid = 256
 
         return sk_grid
