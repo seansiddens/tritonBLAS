@@ -146,7 +146,7 @@ def benchmark_tessera_matmul(
         'wgn': wgn,
         'dtype': str(dtype),
         'tflops': tessera_tflops,
-        'ms': tessera_ms,
+        'us': tessera_ms / 1000,
         'number_of_errors': significant_errors,
         'transA': transA,
         'transB': transB,

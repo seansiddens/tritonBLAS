@@ -15,6 +15,7 @@ import torch
 import tritonblas
 import pandas as pd
 import numpy as np
+import math
 
 def get_all_wgm_wgn_combinations(max_wgm=8, max_wgn=8, num_pid_m=None, num_pid_n=None):
     """Generate all WGM and WGN combinations from 1 to max values, constrained by grid dimensions."""
@@ -120,32 +121,28 @@ def calculate_tcc_hit_rate(csv_file, kernel_name='persistent_matmul_tessera'):
         print(f"Error calculating TCC hit rate: {e}")
         return None
 
-def run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
+def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
         # Create input file for rocprof
         with open("input.txt", "w") as f:
             f.write("pmc: TCC_HIT_sum TCC_MISS_sum\n")
-        
+
         # Run the benchmark script with rocprof
-        cmd = [
-            "rocprofv3", "-i", "input.txt", "-o", "tessera_benchmark", "--",
+        bench_cmd = [
             sys.executable, "run_benchmark.py",
             str(m), str(n), str(k),
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "5",
+            "--warmup", "50",
             "--rep", "50"
         ]
-        
-        print(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
-        
-        if result.returncode != 0:
-            print(f"Benchmark failed: {result.stderr}")
-            return None
-        
+
+        # Benchmark first without 
+        print(f"Running: {' '.join(bench_cmd)}")
+        bench_result = subprocess.run(bench_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+
         # Read the JSON results from run_benchmark.py
         benchmark_data = None
         try:
@@ -153,6 +150,24 @@ def run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
                 benchmark_data = json.load(f)
         except Exception as e:
             print(f"Error reading benchmark results: {e}")
+            return None
+
+        rocprof_cmd = [
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
+            sys.executable, "run_benchmark.py",
+            str(m), str(n), str(k),
+            str(ordering0), str(ordering1),
+            str(wgm), str(wgn),
+            "--dtype", dtype,
+            "--warmup", "50",
+            "--rep", "50"
+        ]
+        
+        print(f"Running: {' '.join(cmd)}")
+        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        
+        if rocprof_result.returncode != 0:
+            print(f"Benchmark failed: {result.stderr}")
             return None
         
         # Analyze rocprof results to get TCC hit rate
@@ -172,11 +187,8 @@ def run_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
                     "ordering_name_1": get_ordering_name(ordering1),
                     "wgm": wgm,
                     "wgn": wgn,
-                    "ms": benchmark_data.get('ms', 0),
                     "tflops": benchmark_data.get('tflops', 0),
-                    "ms_ref": benchmark_data.get('ms_ref', 0),
-                    "tflops_ref": benchmark_data.get('tflops_ref', 0),
-                    "number_of_errors": benchmark_data.get('number_of_errors', 0)
+                    "us": benchmark_data.get('us', 0),
                 }
             }
     except Exception as e:
@@ -194,14 +206,14 @@ def save_progressive_results(results, csv_data, json_path, csv_path):
         with open(csv_path, 'w', newline='') as f:
             fieldnames = [
                 "ordering_0", "ordering_1", "WGM", "WGN", 
-                "tflops", "tflops_ref", "ms", "ms_ref", "number_of_errors", "speedup",
-                "l2_hit_rate_pct", "tcc_hits", "tcc_misses", "total_accesses", "num_dispatches"
+                "tflops", "us", "number_of_errors", 
+                "l2_hit_rate_pct"
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(csv_data)
 
-def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, results_dir="results"):
+def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16, results_dir="results"):
     """Sweep all configurations for a single matrix problem with progressive saving."""
     print(f"\nSweeping matrix problem: M={m}, N={n}, K={k}")
     
@@ -213,8 +225,8 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
     
     # Get all workgroup combinations (constrained by grid dimensions)
-    num_pid_m = m // BLK_M
-    num_pid_n = n // BLK_N
+    num_pid_m = math.ceil(m / BLK_M)
+    num_pid_n = math.ceil(n / BLK_N)
     wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
     
     # All ordering combinations
@@ -223,14 +235,14 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
     
     total_combinations = len(wgm_wgn_combinations) * len(ordering_combinations)
     print(f"  Block sizes: BLK_M={BLK_M}, BLK_N={BLK_N}, BLK_K={BLK_K}")
-    print(f"  Grid: {m//BLK_M} x {n//BLK_N}")
+    print(f"  Grid: {num_pid_m} x {num_pid_n}")
     print(f"  WGM/WGN combinations: {len(wgm_wgn_combinations)}")
     print(f"  Ordering combinations: {len(ordering_combinations)}")
     print(f"  Total combinations: {total_combinations}")
     
     # Generate filenames
-    json_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}.json"
-    csv_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}.csv"
+    json_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.json"
+    csv_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.csv"
     json_path = os.path.join(results_dir, json_filename)
     csv_path = os.path.join(results_dir, csv_filename)
     
@@ -250,6 +262,7 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
             "num_pid_m": m // BLK_M,
             "num_pid_n": n // BLK_N
         },
+        "arch": arch,
         "total_combinations": total_combinations,
         "orderings_tested": [get_ordering_name(o) for o in orderings]
     }
@@ -282,10 +295,11 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
                     "WGM": wgm,
                     "WGN": wgn,
                     "tflops": benchmark_data.get("tflops", 0),
-                    "tflops_ref": benchmark_data.get("tflops_ref", 0),
-                    "ms": benchmark_data.get("ms", 0),
-                    "ms_ref": benchmark_data.get("ms_ref", 0),
+                    "us": benchmark_data.get("us", 0),
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
+                    "transA": benchmark_data["transA"],
+                    "transB": benchmark_data["transB"],
+                    "init_type": benchmark_data["init_type"]
                     "profiler_data": profiler_data
                 }
                 sweep_results.append(sweep_result)
@@ -297,16 +311,9 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
                     "WGM": wgm,
                     "WGN": wgn,
                     "tflops": benchmark_data.get("tflops", 0),
-                    "tflops_ref": benchmark_data.get("tflops_ref", 0),
-                    "ms": benchmark_data.get("ms", 0),
-                    "ms_ref": benchmark_data.get("ms_ref", 0),
+                    "us": benchmark_data.get("us", 0),
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
-                    "speedup": benchmark_data.get("ms_ref", 0) / benchmark_data.get("ms", 1) if benchmark_data.get("ms", 0) > 0 else 0,
-                    "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0,
-                    "tcc_hits": profiler_data.get("tcc_hits", 0) if profiler_data else 0,
-                    "tcc_misses": profiler_data.get("tcc_misses", 0) if profiler_data else 0,
-                    "total_accesses": profiler_data.get("total_accesses", 0) if profiler_data else 0,
-                    "num_dispatches": profiler_data.get("num_dispatches", 0) if profiler_data else 0
+                    "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
                 }
                 csv_data.append(csv_row)
             else:
@@ -337,6 +344,7 @@ def main():
     parser.add_argument("--max-wgm", type=int, default=8, help="Maximum WGM value")
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
+    parser.add_argument("--arch", type=str, required=True)
     
     args = parser.parse_args()
     
@@ -363,7 +371,7 @@ def main():
         
         try:
             # Run sweep with progressive saving
-            results, csv_data = sweep_matrix_problem(m, n, k, args.dtype, args.max_wgm, args.max_wgn, args.results_dir)
+            results, csv_data = sweep_matrix_problem(m, n, k, args.arch, args.dtype, args.max_wgm, args.max_wgn, args.results_dir)
             
             # Print summary
             sweep_results = results["sweep_results"]
