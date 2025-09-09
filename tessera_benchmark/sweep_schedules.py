@@ -292,8 +292,8 @@ def sweep_matrix_problem(m, n, k, dtype="float16", max_wgm=16, max_wgn=16, resul
                 
                 # Add to CSV data
                 csv_row = {
-                    "ordering_0": ordering0,
-                    "ordering_1": ordering1,
+                    "ordering_0": get_ordering_name(ordering0),
+                    "ordering_1": get_ordering_name(ordering1),
                     "WGM": wgm,
                     "WGN": wgn,
                     "tflops": benchmark_data.get("tflops", 0),
