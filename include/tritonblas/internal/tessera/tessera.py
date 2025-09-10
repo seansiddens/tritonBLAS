@@ -353,7 +353,7 @@ def transform(
             return (new_grid_y * grid_x) + new_grid_x
 
 @triton.jit()
-def swizzle_chiplet(index, num_workgroups, num_xcds=8):
+def chiplet_transform(index, num_workgroups, num_xcds):
     """
     Swizzle workgroup assignment across XCDs (eXecute Compute Dies).
     This is the Triton equivalent of the C++ swizzle_chiplet function.
@@ -367,7 +367,6 @@ def swizzle_chiplet(index, num_workgroups, num_xcds=8):
         Swizzled workgroup index
     """
     # Original round-robin assignment
-    index = tl.where(index >= 0, index, 0)  # Ensure non-negative
     xcd = index % num_xcds
     pos_in_xcd = index // num_xcds
     
@@ -377,6 +376,9 @@ def swizzle_chiplet(index, num_workgroups, num_xcds=8):
     
     # This is the total # of WGs assigned to all XCDs before this XCD.
     # Every XCD gets at least `min_per_xcd` WGs.
-    offset = xcd * min_per_xcd + tl.where(xcd < extra_wgs, xcd, extra_wgs)
+    if xcd < extra_wgs:
+        offset = xcd * min_per_xcd + xcd
+    else:
+        offset = xcd * min_per_xcd + extra_wgs
     
     return offset + pos_in_xcd

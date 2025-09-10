@@ -2,14 +2,17 @@ import pytest
 import torch
 import triton
 import tritonblas
+import math
 
 def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
     """Generate valid WGM and WGN combinations that evenly divide the grid dimensions."""
-    grid_m = m // blk_m
-    grid_n = n // blk_n
+    grid_m = math.ceil(m / blk_m)
+    grid_n = math.ceil(n / blk_n)
     
-    valid_wgm = [w for w in range(1, min(max_wgm + 1, grid_m + 1)) if grid_m % w == 0]
-    valid_wgn = [w for w in range(1, min(max_wgn + 1, grid_n + 1)) if grid_n % w == 0]
+    valid_wgm = [w for w in range(1, min(max_wgm + 1, grid_m)) if grid_m % w == 0]
+    valid_wgn = [w for w in range(1, min(max_wgn + 1, grid_n)) if grid_n % w == 0]
+    # valid_wgm = [w for w in range(1, min(max_wgm + 1, grid_m))]
+    # valid_wgn = [w for w in range(1, min(max_wgn + 1, grid_n))]
     
     # Return all combinations
     combinations = []
@@ -23,7 +26,8 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
     "m, n, k",
     [
         # (8192, 8192, 8192),
-        (4864, 8192, 4160),
+        # (4864, 8192, 4160),
+        (5184, 2768, 6000)
         # (4096, 4096, 4096),
     ],
 )
@@ -40,31 +44,31 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
 @pytest.mark.parametrize(
     "transA, transB", 
     [
-        # ("T", "T"),  # A^T @ B^T
+        ("T", "T"),  # A^T @ B^T
         ("N", "N"),  # A @ B
-        # ("T", "N"),  # A^T @ B
-        # ("N", "T"),  # A @ B^T
+        ("T", "N"),  # A^T @ B
+        ("N", "T"),  # A @ B^T
     ],
 )
 @pytest.mark.parametrize(
     "ordering0, ordering1", 
     [
-        (0, 0),  # Row major, Row major
-        (0, 1),  # Row major, Column major
-        (0, 2),  # Row major, Snake
-        (0, 3),  # Row major, Gilbert
-        (1, 0),  # Column major, Row major
-        (1, 1),  # Column major, Column major
-        (1, 2),  # Column major, Snake
-        (1, 3),  # Column major, Gilbert
-        (2, 0),  # Snake, Row major
-        (2, 1),  # Snake, Column major
-        (2, 2),  # Snake, Snake
-        (2, 3),  # Snake, Gilbert
-        (3, 0),  # Gilbert, Row major
-        (3, 1),  # Gilbert, Column major
-        (3, 2),  # Gilbert, Snake
-        (3, 3),  # Gilbert, Gilbert
+        (0, 0),  
+        (0, 1),  
+        (0, 2),  
+        (0, 3),  
+        (1, 0),  
+        (1, 1),  
+        (1, 2),  
+        (1, 3),  
+        (2, 0),  
+        (2, 1),  
+        (2, 2),  
+        (2, 3),  
+        (3, 0),  
+        (3, 1),  
+        (3, 2),  
+        (3, 3),  
     ],
 )
 def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0, ordering1):
@@ -97,9 +101,14 @@ def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0,
     # Run TritonBLAS matmul tessera
     selector = tritonblas.MatmulHeuristicResult(m, n, k, A.dtype, B.dtype, C.dtype)
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+    print(f"Block sizes: BLK_M={BLK_M}, BLK_N={BLK_N}, BLK_K={BLK_K}")
+    print(f"Grid dimensions: {math.ceil(m/BLK_M)} x {math.ceil(n/BLK_N)}")
     
     # Get valid WGM and WGN combinations that evenly divide the grid
-    wgm_wgn_combinations = get_valid_wgm_wgn_combinations(m, n, BLK_M, BLK_N, max_wgm=16, max_wgn=16)
+    wgm_wgn_combinations = get_valid_wgm_wgn_combinations(m, n, BLK_M, BLK_N, max_wgm=8, max_wgn=8)
+    print(f"Number of shape combinations to test: {len(wgm_wgn_combinations)}")
+    for wgm_wgn in wgm_wgn_combinations:
+        print(wgm_wgn)
     
     # Test each valid WGM/WGN combination
     for wgm, wgn in wgm_wgn_combinations:
@@ -110,4 +119,4 @@ def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0,
         
         # Check correctness for this WGM/WGN combination
         torch_c = torch.matmul(A, B)
-        torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
+        torch.testing.assert_close(C.to(out_dtype), torch_c)
