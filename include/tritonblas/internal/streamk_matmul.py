@@ -41,7 +41,6 @@ def streamk_matmul(
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    iters_per_tile = tl.cdiv(K, BLOCK_SIZE_K)
     total_tiles = num_pid_m * num_pid_n
     total_full_tiles = total_tiles - STREAMK_TILES
 
@@ -54,7 +53,7 @@ def streamk_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_full_tiles, NUM_SMS, flatten=True):
+    for tile_id in range(pid, total_full_tiles, NUM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -122,11 +121,23 @@ def streamk_matmul(
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        mask = (rm < M)[:, None] & (rn < N)[None, :]
         tl.store(C_, c, mask=mask)
 
+    if STREAMK_TILES == 0:
+        return
+
+    rm1 = tl.arange(0, BLOCK_SIZE_M)
+    rn1 = tl.arange(0, BLOCK_SIZE_N)
+    rm1 = tl.max_contiguous(tl.multiple_of(rm1, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    rn1 = tl.max_contiguous(tl.multiple_of(rn1, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    P_ = P + pid * BLOCK_SIZE_M * BLOCK_SIZE_N + rm1[:, None] * BLOCK_SIZE_N + rn1[None, :]
+    tl.store(P_, 0.0, cache_modifier=".wt")
+    tl.store(locks + pid, 0, cache_modifier=".wt")
+
     tl.assume(pid >= 0)
+    iters_per_tile = tl.cdiv(K, BLOCK_SIZE_K)
     total_streamk_iters = STREAMK_TILES * iters_per_tile
     streamk_iters_pcu = total_streamk_iters // NUM_SMS
     streamk_remainder_iters = total_streamk_iters % NUM_SMS
