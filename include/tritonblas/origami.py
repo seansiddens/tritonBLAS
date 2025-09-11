@@ -56,6 +56,20 @@ class MatmulHeuristicResult:
         self.mx_block_size = mx_block_size
 
         self.config = self._prepare_config()
+
+        # Grid model constants
+        self.split_factors = [8, 6, 4, 3, 2, 1]
+
+        self.tile_fractions = [
+            0.0,
+            1.0 / 2.0,
+            1.0 / 8.0,
+            1.0 / 5.0,
+            1.0 / 4.0,
+            1.0 / 3.0,
+        ]
+        self.max_workspace = 128 * 1024 * 1024
+
         if streamk:
             self.grid = self.compute_sk_grid()
         else:
@@ -232,14 +246,7 @@ class MatmulHeuristicResult:
             # virt_cu_count *= size_mapping.CUOccupancy
 
             # Try these fractional denominators in order
-            tile_fractions = [
-                0.0,
-                1.0 / 2.0,
-                1.0 / 8.0,
-                1.0 / 5.0,
-                1.0 / 4.0,
-                1.0 / 3.0,
-            ]
+            tile_fractions = self.tile_fractions
             min_even_tiles = tiles / virt_cu_count
 
             for frac in tile_fractions:
@@ -249,7 +256,7 @@ class MatmulHeuristicResult:
                 # Skip if this split leaves a remainder AND workspace is too large
                 if (
                     tiles % frac_grid != 0
-                    and self.partial_tile_size(frac_grid) > 128 * 1024 * 1024
+                    and self.partial_tile_size(frac_grid) > self.max_workspace
                 ):
                     continue
 
@@ -260,7 +267,7 @@ class MatmulHeuristicResult:
 
         # Fewer tiles than CUs: split along k-dimension up to some factor
         elif tiles < cu_count:
-            split_factors = [8, 6, 4, 3, 2, 1]
+            split_factors = self.split_factors
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
