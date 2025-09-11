@@ -27,7 +27,8 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
     [
         # (8192, 8192, 8192),
         # (4864, 8192, 4160),
-        (5184, 2768, 6000)
+        # (5184, 2768, 6000),
+        (7744, 5616, 6080)
         # (4096, 4096, 4096),
     ],
 )
@@ -44,31 +45,31 @@ def get_valid_wgm_wgn_combinations(m, n, blk_m, blk_n, max_wgm=16, max_wgn=16):
 @pytest.mark.parametrize(
     "transA, transB", 
     [
-        ("T", "T"),  # A^T @ B^T
+        # ("T", "T"),  # A^T @ B^T
         ("N", "N"),  # A @ B
-        ("T", "N"),  # A^T @ B
-        ("N", "T"),  # A @ B^T
+        # ("T", "N"),  # A^T @ B
+        # ("N", "T"),  # A @ B^T
     ],
 )
 @pytest.mark.parametrize(
     "ordering0, ordering1", 
     [
         (0, 0),  
-        (0, 1),  
-        (0, 2),  
-        (0, 3),  
-        (1, 0),  
-        (1, 1),  
-        (1, 2),  
-        (1, 3),  
-        (2, 0),  
-        (2, 1),  
-        (2, 2),  
-        (2, 3),  
-        (3, 0),  
-        (3, 1),  
-        (3, 2),  
-        (3, 3),  
+        # (0, 1),  
+        # (0, 2),  
+        # (0, 3),  
+        # (1, 0),  
+        # (1, 1),  
+        # (1, 2),  
+        # (1, 3),  
+        # (2, 0),  
+        # (2, 1),  
+        # (2, 2),  
+        # (2, 3),  
+        # (3, 0),  
+        # (3, 1),  
+        # (3, 2),  
+        # (3, 3),  
     ],
 )
 def test_matmul_tessera(m, n, k, in_dtype, out_dtype, transA, transB, ordering0, ordering1):

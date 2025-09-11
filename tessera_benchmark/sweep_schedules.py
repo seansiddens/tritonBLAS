@@ -198,7 +198,7 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
         print(f"Error running benchmark: {e}")
         return None
 
-def run_baseline_benchmark(m, n, k, wgm, dtype="float16"):
+def run_baseline_benchmark(m, n, k, wgm, dtype="bfloat16"):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
         # Create input file for rocprof
@@ -336,14 +336,20 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
     baseline_wgm_values = [1, 2, 4, 6, 8, 16]
     print(f"Computing baseline perf for WGMs: {baseline_wgm_values}...")
     for wgm in baseline_wgm_values:
-        if wgm > num_pid_m or wgm > num_pid_n:
-            break
+        # if wgm > num_pid_m or wgm > num_pid_n:
+        #     break
         baseline_results.append(run_baseline_benchmark(m, n, k, wgm))
 
     optimal_l2_hit_rate = -1
     optimal_tflops = -1
     optimal_ms = -1
     optimal_wgm = -1
+    
+    # Initialize predicted values
+    predicted_tflops = None
+    predicted_l2_hit_rate = None
+    predicted_ms = None
+    
     for res in baseline_results:
         profiler_data = res["profiler_data"]
         benchmark_data = res["benchmark_data"]
@@ -358,12 +364,17 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
             optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
             optimal_ms = benchmark_data["ms"]
 
+    # Check if predicted values were found
+    if predicted_tflops is None:
+        raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m}. Available WGMs: {[res['benchmark_data']['wgm'] for res in baseline_results]}")
+    if optimal_tflops == -1:
+        raise RuntimeError("No valid baseline results found - all baseline runs failed")
 
     baseline_data = {
         "predicted_wgm": gsize_m, 
         "predicted_tflops": predicted_tflops,
         "predicted_l2_hit_rate": predicted_l2_hit_rate, 
-        "predicted_ms": predicted_l2_hit_rate, 
+        "predicted_ms": predicted_ms, 
         "optimal_wgm": optimal_wgm,
         "optimal_tflops": optimal_tflops,
         "optimal_ms": optimal_ms,
@@ -473,7 +484,7 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
 def main():
     parser = argparse.ArgumentParser(description="Sweep tessera matmul configurations")
     parser.add_argument("csv_file", help="CSV file with matrix problems (m,n,k)")
-    parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"], help="Data type")
+    parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="Data type")
     parser.add_argument("--max-wgm", type=int, default=8, help="Maximum WGM value")
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
