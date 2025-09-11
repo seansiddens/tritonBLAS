@@ -124,7 +124,7 @@ def streamk_matmul_lt(
     mfmaInstrSize = 16
     kpack = 1
 
-    if sk_grid != None:
+    if sk_grid is not None:
         total_programs_streamk = sk_grid
 
     grids = total_programs_streamk
