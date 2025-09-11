@@ -21,7 +21,7 @@ def _make_matmul_selector(M: int, N: int, K: int,
 
 
 def persistent_matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, ORD0, ORD1, WGM, WGN
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -43,6 +43,12 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+
+    if WGN == -1:
+        print(f"WGN is -1, default gsize_m: {gsize_m} is used")
+        # WGM = gsize_m
+
+
 
     # Run in Data-parallel mode.
     grids = total_tiles
@@ -66,7 +72,10 @@ def persistent_matmul_lt(
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
+        ORD0=ORD0,
+        ORD1=ORD1,
+        WGM=WGM,
+        WGN=WGN,
         NUM_SMS=total_programs,
         NUM_XCDS=8,
         BIAS=False,
@@ -184,13 +193,13 @@ def streamk_matmul_lt(
     return c
 
 def matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
-    selector, enable_streamk = False):
+    selector, ORD0, ORD1, WGM, WGN, enable_streamk = False):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, ORD0, ORD1, WGM, WGN)
 
 def matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, enable_streamk = False):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"

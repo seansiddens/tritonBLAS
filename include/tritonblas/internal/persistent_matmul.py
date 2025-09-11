@@ -2,6 +2,8 @@ import triton
 import triton.language as tl
 import torch
 
+from .tessera.tessera import chiplet_transform, transform
+
 
 @triton.jit()
 def persistent_matmul(
@@ -22,7 +24,10 @@ def persistent_matmul(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
+    ORD0: tl.constexpr,
+    ORD1: tl.constexpr,
+    WGM: tl.constexpr,
+    WGN: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
@@ -31,7 +36,9 @@ def persistent_matmul(
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        # pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -46,12 +53,28 @@ def persistent_matmul(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        if WGN == -1:
+            num_pid_in_group = WGM * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * WGM
+            group_size_m = min(num_pid_m - first_pid_m, WGM)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+        else:
+            pid = transform(
+                tile_id, 
+                num_pid_m,
+                num_pid_n,
+                ORD0,
+                num_pid_m // WGM,
+                num_pid_n // WGN,
+                ORD1,
+                WGM,
+                WGN,
+            )
+            pid_m = pid // num_pid_n
+            pid_n = pid % num_pid_n
+
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
