@@ -1,3 +1,5 @@
+import triton
+
 @triton.jit()
 def chiplet_transform(
     pid,
@@ -9,4 +11,4 @@ def chiplet_transform(
     min_per_xcd = num_workgroups // num_xcds 
     extra_sms = num_workgroups % num_xcds 
     offset = xcd * min_per_xcd + min(xcd, extra_sms)
-    return  = offset + pos_in_xcd
+    return offset + pos_in_xcd
