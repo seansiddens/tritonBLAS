@@ -6,12 +6,13 @@ import time
 from .internal.persistent_matmul import persistent_matmul
 from .internal.streamk_matmul import streamk_matmul
 from .origami import MatmulHeuristicResult
+from typing import Dict, Tuple, Optional
 
 _tensor_cache = {}
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
-#TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
+# TODO: 256x256 for fp16/bf16, need adjust for fp8/fp4
 MAX_BLOCK_SIZE = 65536
 
 # Global pre-allocated buffers
@@ -92,7 +93,10 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
 
     return c
 
-def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
+
+def streamk_matmul_lt(
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, sk_grid: Optional[int] = None
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -119,6 +123,9 @@ def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selecto
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+
+    if sk_grid is not None:
+        total_programs_streamk = sk_grid
 
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
@@ -166,6 +173,7 @@ def streamk_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selecto
 
     return c
 
+
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
 ):
@@ -177,13 +185,19 @@ def matmul_lt(
         return persistent_matmul_lt(a, b, c, selector)
 
 
-def matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, enable_streamk=False):
+def matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    enable_streamk=False,
+    sk_grid=None,
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype)
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector)
+        return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
         return persistent_matmul_lt(a, b, c, selector)
