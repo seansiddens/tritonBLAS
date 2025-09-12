@@ -300,7 +300,7 @@ class MatmulHeuristicResult:
 
         if tiles >= self.hardware.N_CU:
             last_wave_remainder = tiles % self.hardware.N_CU
-            last_wave_occupancy = (tiles % self.hardware.N_CU) / self.hardware.N_CU
+            last_wave_occupancy = last_wave_remainder / self.hardware.N_CU
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited
