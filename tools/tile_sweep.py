@@ -22,12 +22,12 @@ def perf_ms(ms, m, n, k):
 
 # Custom heuristic selector that forces TritonBLAS to use the provided macro tile.
 class CustomHeuristic(tritonblas.MatmulHeuristicResult):
-    def __init__(self, m, n, k, custom_tile):
+    def __init__(self, m, n, k, custom_tile, a_dtype, b_dtype, c_dtype):
         """
         custom_tile: A tuple (BLK_M, BLK_N, BLK_K)
         """
         self.custom_tile = custom_tile
-        super().__init__(m, n, k, torch.float16, torch.float16, torch.float16)
+        super().__init__(m, n, k, a_dtype, b_dtype, c_dtype)
 
     def _get_best_tile_size(self):
         return self.custom_tile
@@ -36,19 +36,21 @@ class CustomHeuristic(tritonblas.MatmulHeuristicResult):
         return super()._get_gsize_m(BLK_M, BLK_N, BLK_K)
 
 
-def run_tritonblas_matmul(m, n, k, BLK_M, BLK_N, BLK_K, transA, transB):
+def run_tritonblas_matmul(
+    m, n, k, a_dtype, b_dtype, c_dtype, BLK_M, BLK_N, BLK_K, transA, transB
+):
     # Determine the actual shape to allocate, then transpose if needed
     # A_orig is always (M x K) if transA=='N', else (K x M)
     if transA == "N":
-        A = torch.randn(m, k, device="cuda", dtype=torch.float16)
+        A = torch.randn(m, k, device="cuda", dtype=a_dtype)
     else:  # transA == "T"
-        A = torch.randn(k, m, device="cuda", dtype=torch.float16)
+        A = torch.randn(k, m, device="cuda", dtype=a_dtype)
 
     # B_orig is always (K x N) if transB=='N', else (N x K)
     if transB == "N":
-        B = torch.randn(k, n, device="cuda", dtype=torch.float16)
+        B = torch.randn(k, n, device="cuda", dtype=b_dtype)
     else:  # transB == "T"
-        B = torch.randn(n, k, device="cuda", dtype=torch.float16)
+        B = torch.randn(n, k, device="cuda", dtype=b_dtype)
 
     # Now apply the logical transpose flags so that matmul sees A: (M x K), B: (K x N)
     if transA == "T":
@@ -57,19 +59,27 @@ def run_tritonblas_matmul(m, n, k, BLK_M, BLK_N, BLK_K, transA, transB):
         B = B.T  # shape -> (K x N)
 
     # Allocate output
-    C = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    C = torch.zeros((m, n), device="cuda", dtype=c_dtype)
 
-    selector = CustomHeuristic(m, n, k, custom_tile=(BLK_M, BLK_N, BLK_K))
+    selector = CustomHeuristic(
+        m,
+        n,
+        k,
+        custom_tile=(BLK_M, BLK_N, BLK_K),
+        a_dtype=A.dtype,
+        b_dtype=B.dtype,
+        c_dtype=C.dtype,
+    )
     config = selector.get_config()  # (BLK_M, BLK_N, BLK_K, group_size)
 
     # Benchmark
-    matmul_fn = lambda: tritonblas.matmul_lt(A, B, C, selector)
+    matmul_fn = lambda: tritonblas.matmul_lt(A, B, C, selector, False)
     elapsed_ms = triton.testing.do_bench(matmul_fn, warmup=10, rep=10)
     tflops = perf_ms(elapsed_ms, m, n, k)
     return tflops, elapsed_ms, config
 
 
-def sweep_macro_tiles_tritonblas(m, n, k, transA, transB):
+def sweep_macro_tiles_tritonblas(m, n, k, a_dtype, b_dtype, c_dtype, transA, transB):
     # Candidate tile sizes
     block_mn_range = [16, 32, 64, 128, 256]
     block_k_range = [16, 32, 64]
@@ -77,7 +87,7 @@ def sweep_macro_tiles_tritonblas(m, n, k, transA, transB):
 
     # Default heuristic (for comparison)
     default_selector = tritonblas.MatmulHeuristicResult(
-        m, n, k, torch.float16, torch.float16, torch.float16
+        m, n, k, a_dtype, b_dtype, c_dtype
     )
     heur_config = default_selector.get_config()
     heur_tile = (heur_config[0], heur_config[1], heur_config[2])
@@ -91,7 +101,7 @@ def sweep_macro_tiles_tritonblas(m, n, k, transA, transB):
         BLK_M, BLK_N, BLK_K = tile
         try:
             tflops, ms, config = run_tritonblas_matmul(
-                m, n, k, BLK_M, BLK_N, BLK_K, transA, transB
+                m, n, k, a_dtype, b_dtype, c_dtype, BLK_M, BLK_N, BLK_K, transA, transB
             )
             results.append((tile, tflops, ms))
             if tflops > best_tflops:
@@ -104,7 +114,7 @@ def sweep_macro_tiles_tritonblas(m, n, k, transA, transB):
     # Benchmark the heuristic tile
     try:
         heur_tflops, heur_ms, _ = run_tritonblas_matmul(
-            m, n, k, *heur_tile, transA, transB
+            m, n, k, a_dtype, b_dtype, c_dtype, *heur_tile, transA, transB
         )
         heur_ratio = heur_tflops / best_tflops if best_tflops > 0 else 0.0
     except Exception as e:
@@ -150,9 +160,45 @@ if __name__ == "__main__":
         "--k", type=int, default=random.randint(1024, 8192), help="Matrix K"
     )
     parser.add_argument(
+        "--a_dtype",
+        choices=[
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.float8_e5m2,
+            torch.float8_e4m3fnuz,
+        ],
+        default=torch.float16,
+        help="Input data type ('torch.float16', 'torch.bfloat16', 'torch.float8_e5m2', 'torch.float8_e4m3fnuz' default: 'torch.float16').",
+    )
+    parser.add_argument(
+        "--b_dtype",
+        choices=[
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.float8_e5m2,
+            torch.float8_e4m3fnuz,
+        ],
+        default=torch.float16,
+        help="Input data type ('torch.float16', 'torch.bfloat16', 'torch.float8_e5m2', 'torch.float8_e4m3fnuz' default: 'torch.float16').",
+    )
+    parser.add_argument(
+        "--c_dtype",
+        choices=[
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.float8_e5m2,
+            torch.float8_e4m3fnuz,
+        ],
+        default=torch.float16,
+        help="Input data type ('torch.float16', 'torch.bfloat16', 'torch.float8_e5m2', 'torch.float8_e4m3fnuz' default: 'torch.float16').",
+    )
+    parser.add_argument(
         "--transA",
         choices=["N", "T"],
-        default="N",
+        default="T",
         help="Transpose A? 'N' = no, 'T' = yes",
     )
     parser.add_argument(
@@ -166,4 +212,13 @@ if __name__ == "__main__":
     print(
         f"Running problem {args.m}x{args.n}x{args.k} with transA={args.transA}, transB={args.transB}"
     )
-    sweep_macro_tiles_tritonblas(args.m, args.n, args.k, args.transA, args.transB)
+    sweep_macro_tiles_tritonblas(
+        args.m,
+        args.n,
+        args.k,
+        args.a_dtype,
+        args.b_dtype,
+        args.c_dtype,
+        args.transA,
+        args.transB,
+    )
