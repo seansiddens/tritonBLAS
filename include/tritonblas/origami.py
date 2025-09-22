@@ -180,7 +180,6 @@ class MatmulHeuristicResult:
 
     def _get_best_tile_size(self):
         valid_tiles = self._get_valid_tiles()
-        valid_tiles = [tuple(int(x) for x in t) + (6,) for t in valid_tiles]
 
         results = origami.select_best_macro_tile_size(
             self.m,  # M
