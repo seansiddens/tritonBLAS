@@ -1,12 +1,13 @@
 {
-  "ordering0": 1,
+  "ordering0": 3,
   "ordering1": 0,
-  "wgm": 1,
+  "wgm": 2,
   "wgn": 7,
-  "dtype": "torch.float16",
-  "tflops": 101.33632040337622,
-  "tflops_ref": 113.98187345183264,
-  "ms": 0.021191648161802135,
-  "ms_ref": 0.01884057160112832,
-  "number_of_errors": 0
+  "dtype": "torch.bfloat16",
+  "tflops": 250.1529127756881,
+  "ms": 0.3393303354581197,
+  "number_of_errors": 1716,
+  "transA": "N",
+  "transB": "N",
+  "init_type": "randn"
 }

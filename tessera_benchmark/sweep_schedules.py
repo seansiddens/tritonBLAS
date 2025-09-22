@@ -135,8 +135,8 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "20",
-            "--rep", "20"
+            "--warmup", "10",
+            "--rep", "10"
         ]
 
         # Benchmark first without 
