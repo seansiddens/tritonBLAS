@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -16,6 +17,16 @@ import tritonblas
 import pandas as pd
 import numpy as np
 import math
+
+MISCOPE_COLUMNS = [
+    "curr_gfxclk",
+    "curr_socclk",
+    "curr_uclk",
+    "curr_power",
+    "pcie_bandwidth_inst",
+] + [f"curr_gfxclks{i}" for i in range(8)]
+
+MISCOPE_MEAN_KEYS = [f"{col}_mean" for col in MISCOPE_COLUMNS]
 
 def get_all_wgm_wgn_combinations(max_wgm=8, max_wgn=8, num_pid_m=None, num_pid_n=None):
     """Generate all WGM and WGN combinations from 1 to max values, constrained by grid dimensions."""
@@ -121,11 +132,82 @@ def calculate_tcc_hit_rate(csv_file, kernel_name='persistent_matmul_tessera'):
         print(f"Error calculating TCC hit rate: {e}")
         return None
 
-def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float16"):
+
+def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gpu_ids="0"):
+    """Run the benchmark through miscope and return process result and selected metric means."""
+    bench_cmd_str = " ".join(shlex.quote(str(arg)) for arg in bench_cmd)
+
+    metrics_candidates = [
+        os.path.join(base_dir, f"{metrics_prefix}_0"),
+        os.path.join(base_dir, f"{metrics_prefix}.csv_0"),
+    ]
+
+    for path in metrics_candidates:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    miscope_script = os.path.join(base_dir, "miscope", "miscope.py")
+    miscope_cmd = [
+        sys.executable,
+        miscope_script,
+        "--cmd",
+        bench_cmd_str,
+        "--gpus",
+        gpu_ids,
+        "--prefix",
+        metrics_prefix,
+    ]
+
+    print(f"Running with miscope: {' '.join(shlex.quote(str(arg)) for arg in miscope_cmd)}")
+    result = subprocess.run(miscope_cmd, capture_output=True, text=True, cwd=base_dir)
+
+    if result.returncode != 0:
+        print(f"miscope benchmark failed: {result.stderr}")
+        return None, None
+
+    metric_means = {f"{col}_mean": None for col in MISCOPE_COLUMNS}
+    for path in metrics_candidates:
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                for column in MISCOPE_COLUMNS:
+                    mean_key = f"{column}_mean"
+                    if column in df.columns:
+                        series = pd.to_numeric(df[column], errors='coerce')
+                        series = series.replace([np.inf, -np.inf], np.nan).dropna()
+                        if not series.empty:
+                            metric_means[mean_key] = float(series.mean())
+                    else:
+                        if metric_means[mean_key] is None:
+                            print(f"Warning: '{column}' column not found in {path}")
+            except Exception as exc:
+                print(f"Error processing miscope metrics from {path}: {exc}")
+            finally:
+                break
+
+    return result, metric_means
+
+def run_tessera_benchmark(
+    m,
+    n,
+    k,
+    ordering0,
+    ordering1,
+    wgm,
+    wgn,
+    dtype="float16",
+    warmup_ms=10,
+    rep_ms=10,
+):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
         # Create input file for rocprof
-        with open("input.txt", "w") as f:
+        with open(os.path.join(base_dir, "input.txt"), "w") as f:
             f.write("pmc: TCC_HIT_sum TCC_MISS_sum\n")
 
         # Run the benchmark script with rocprof
@@ -135,19 +217,25 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "10",
-            "--rep", "10"
+            "--warmup", str(warmup_ms),
+            "--rep", str(rep_ms)
         ]
 
-        # Benchmark first without 
-        print(f"Running: {' '.join(bench_cmd)}")
-        bench_result = subprocess.run(bench_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        # Benchmark first without rocprof, wrapped with miscope for metrics capture
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir)
+        if miscope_result is None:
+            return None
+        if metric_means.get("curr_gfxclk_mean") is None:
+            print("Error: Unable to compute curr_gfxclk_mean from miscope output")
+            return None
 
         # Read the JSON results from run_benchmark.py
         benchmark_data = None
         try:
-            with open("benchmark_results.json", "r") as f:
+            with open(os.path.join(base_dir, "benchmark_results.json"), "r") as f:
                 benchmark_data = json.load(f)
+            for mean_key, value in metric_means.items():
+                benchmark_data[mean_key] = value
         except Exception as e:
             print(f"Error reading benchmark results: {e}")
             return None
@@ -159,12 +247,12 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", "20",
-            "--rep", "20"
+            "--warmup", str(warmup_ms),
+            "--rep", str(rep_ms)
         ]
         
         print(f"Running: {' '.join(rocprof_cmd)}")
-        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=base_dir)
         
         if rocprof_result.returncode != 0:
             print(f"Benchmark failed: {rocprof_result.stderr}")
@@ -172,37 +260,50 @@ def run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype="float1
         
         # Analyze rocprof results to get TCC hit rate
         profiler_data = None
-        csv_file = "pmc_1/tessera_benchmark_counter_collection.csv"
+        csv_file = os.path.join(base_dir, "pmc_1", "tessera_benchmark_counter_collection.csv")
         if os.path.exists(csv_file):
             profiler_data = calculate_tcc_hit_rate(csv_file, 'persistent_matmul_tessera')
         else:
             print(f"Warning: rocprof CSV file not found: {csv_file}")
-        
+
         # Combine benchmark and profiler data
         if benchmark_data and profiler_data:
+            combined_benchmark_data = {
+                "ordering_name_0": get_ordering_name(ordering0),
+                "ordering_name_1": get_ordering_name(ordering1),
+                "wgm": wgm,
+                "wgn": wgn,
+                "tflops": benchmark_data.get('tflops', 0),
+                "ms": benchmark_data.get('ms', 0),
+                "transA": benchmark_data["transA"],
+                "transB": benchmark_data["transB"],
+                "init_type": benchmark_data["init_type"]
+            }
+            for mean_key in MISCOPE_MEAN_KEYS:
+                combined_benchmark_data[mean_key] = benchmark_data.get(mean_key)
+
             return {
                 "profiler_data": profiler_data,
-                "benchmark_data": {
-                    "ordering_name_0": get_ordering_name(ordering0),
-                    "ordering_name_1": get_ordering_name(ordering1),
-                    "wgm": wgm,
-                    "wgn": wgn,
-                    "tflops": benchmark_data.get('tflops', 0),
-                    "ms": benchmark_data.get('ms', 0),
-                    "transA": benchmark_data["transA"],
-                    "transB": benchmark_data["transB"],
-                    "init_type": benchmark_data["init_type"]
-                }
+                "benchmark_data": combined_benchmark_data
             }
     except Exception as e:
         print(f"Error running benchmark: {e}")
         return None
 
-def run_baseline_benchmark(m, n, k, wgm, dtype="bfloat16"):
+def run_baseline_benchmark(
+    m,
+    n,
+    k,
+    wgm,
+    dtype="bfloat16",
+    warmup_ms=10,
+    rep_ms=10,
+):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         # Create input file for rocprof
-        with open("input.txt", "w") as f:
+        with open(os.path.join(base_dir, "input.txt"), "w") as f:
             f.write("pmc: TCC_HIT_sum TCC_MISS_sum\n")
 
         # Run the benchmark script with rocprof
@@ -212,20 +313,26 @@ def run_baseline_benchmark(m, n, k, wgm, dtype="bfloat16"):
             "0", "0",
             str(wgm), "1",
             "--dtype", dtype,
-            "--warmup", "20",
-            "--rep", "20",
+            "--warmup", str(warmup_ms),
+            "--rep", str(rep_ms),
             "--baseline"            
         ]
 
-        # Benchmark first without 
-        print(f"Running: {' '.join(bench_cmd)}")
-        bench_result = subprocess.run(bench_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        # Benchmark first without rocprof, wrapped with miscope for metrics capture
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir)
+        if miscope_result is None:
+            return None
+        if metric_means.get("curr_gfxclk_mean") is None:
+            print("Error: Unable to compute curr_gfxclk_mean from miscope output for baseline run")
+            return None
 
         # Read the JSON results from run_benchmark.py
         benchmark_data = None
         try:
-            with open("benchmark_results.json", "r") as f:
+            with open(os.path.join(base_dir, "benchmark_results.json"), "r") as f:
                 benchmark_data = json.load(f)
+            for mean_key, value in metric_means.items():
+                benchmark_data[mean_key] = value
             print("loaded baseline data")
         except Exception as e:
             print(f"Error reading benchmark results: {e}")
@@ -238,22 +345,22 @@ def run_baseline_benchmark(m, n, k, wgm, dtype="bfloat16"):
             "0", "0",
             str(wgm), "1",
             "--dtype", dtype,
-            "--warmup", "20",
-            "--rep", "20",
+            "--warmup", str(warmup_ms),
+            "--rep", str(rep_ms),
             "--baseline"
         ]
         
         print("Running with rocprof...") 
         print(f"Running: {' '.join(rocprof_cmd)}")
-        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=base_dir)
         
         if rocprof_result.returncode != 0:
             print(f"Benchmark failed: {rocprof_result.stderr}")
             return None
-        
+
         # Analyze rocprof results to get TCC hit rate
         profiler_data = None
-        csv_file = "pmc_1/tessera_benchmark_counter_collection.csv"
+        csv_file = os.path.join(base_dir, "pmc_1", "tessera_benchmark_counter_collection.csv")
         if os.path.exists(csv_file):
             profiler_data = calculate_tcc_hit_rate(csv_file, 'persistent_matmul')
             print(json.dumps(profiler_data, indent=4))
@@ -262,16 +369,20 @@ def run_baseline_benchmark(m, n, k, wgm, dtype="bfloat16"):
         
         # Combine benchmark and profiler data
         if benchmark_data and profiler_data:
+            combined_benchmark_data = {
+                "wgm": wgm,
+                "tflops": benchmark_data.get('tflops', 0),
+                "ms": benchmark_data.get('ms', 0),
+                "transA": benchmark_data["transA"],
+                "transB": benchmark_data["transB"],
+                "init_type": benchmark_data["init_type"]
+            }
+            for mean_key in MISCOPE_MEAN_KEYS:
+                combined_benchmark_data[mean_key] = benchmark_data.get(mean_key)
+
             return {
                 "profiler_data": profiler_data,
-                "benchmark_data": {
-                    "wgm": wgm,
-                    "tflops": benchmark_data.get('tflops', 0),
-                    "ms": benchmark_data.get('ms', 0),
-                    "transA": benchmark_data["transA"],
-                    "transB": benchmark_data["transB"],
-                    "init_type": benchmark_data["init_type"]
-                }
+                "benchmark_data": combined_benchmark_data
             }
     except Exception as e:
         print(f"Error running benchmark: {e}")
@@ -287,15 +398,27 @@ def save_progressive_results(results, csv_data, json_path, csv_path):
     if csv_data:
         with open(csv_path, 'w', newline='') as f:
             fieldnames = [
-                "ordering_0", "ordering_1", "WGM", "WGN", 
-                "tflops", "ms", "number_of_errors", 
-                "l2_hit_rate_pct"
+                "ordering_0", "ordering_1", "WGM", "WGN",
+                "tflops", "ms", "number_of_errors",
             ]
+            fieldnames.extend(MISCOPE_MEAN_KEYS)
+            fieldnames.append("l2_hit_rate_pct")
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(csv_data)
 
-def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16, results_dir="results"):
+def sweep_matrix_problem(
+    m,
+    n,
+    k,
+    arch,
+    dtype="float16",
+    max_wgm=16,
+    max_wgn=16,
+    results_dir="results",
+    warmup_ms=10,
+    rep_ms=10,
+):
     """Sweep all configurations for a single matrix problem with progressive saving."""
     print(f"\nSweeping matrix problem: M={m}, N={n}, K={k}")
     
@@ -309,7 +432,8 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
     # Get all workgroup combinations (constrained by grid dimensions)
     num_pid_m = math.ceil(m / BLK_M)
     num_pid_n = math.ceil(n / BLK_N)
-    wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
+    # wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
+    wgm_wgn_combinations = [(4, 4), (4, 8), (8, 4), (6, 6)]
     print(f"Num wgm/wgn combinations to test: {len(wgm_wgn_combinations)}")
     
     # All ordering combinations
@@ -338,37 +462,69 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
     for wgm in baseline_wgm_values:
         # if wgm > num_pid_m or wgm > num_pid_n:
         #     break
-        baseline_results.append(run_baseline_benchmark(m, n, k, wgm))
+        baseline_result = run_baseline_benchmark(
+            m,
+            n,
+            k,
+            wgm,
+            dtype=dtype,
+            warmup_ms=warmup_ms,
+            rep_ms=rep_ms,
+        )
+        if baseline_result is not None:
+            baseline_results.append(baseline_result)
 
     optimal_l2_hit_rate = -1
     optimal_tflops = -1
     optimal_ms = -1
     optimal_wgm = -1
-    
     # Initialize predicted values
     predicted_tflops = None
     predicted_l2_hit_rate = None
     predicted_ms = None
-    
+
+    baseline_runs = []
+    predicted_metrics = None
+    optimal_metrics = None
+
     for res in baseline_results:
         profiler_data = res["profiler_data"]
         benchmark_data = res["benchmark_data"]
+        metrics_snapshot = {mean_key: benchmark_data.get(mean_key) for mean_key in MISCOPE_MEAN_KEYS}
+
+        baseline_entry = {
+            "wgm": benchmark_data.get("wgm"),
+            "tflops": benchmark_data.get("tflops"),
+            "ms": benchmark_data.get("ms"),
+            "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
+            "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None
+        }
+        baseline_entry.update(metrics_snapshot)
+        baseline_runs.append(baseline_entry)
+
         if benchmark_data["wgm"] == gsize_m:
             predicted_tflops = benchmark_data["tflops"]
             predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
             predicted_ms = benchmark_data["ms"]
+            predicted_metrics = metrics_snapshot
         
         if benchmark_data["tflops"] > optimal_tflops:
             optimal_wgm = benchmark_data["wgm"]
             optimal_tflops = benchmark_data["tflops"]
             optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
             optimal_ms = benchmark_data["ms"]
+            optimal_metrics = metrics_snapshot
 
     # Check if predicted values were found
     if predicted_tflops is None:
         raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m}. Available WGMs: {[res['benchmark_data']['wgm'] for res in baseline_results]}")
     if optimal_tflops == -1:
         raise RuntimeError("No valid baseline results found - all baseline runs failed")
+
+    if predicted_metrics is None:
+        predicted_metrics = {mean_key: None for mean_key in MISCOPE_MEAN_KEYS}
+    if optimal_metrics is None:
+        optimal_metrics = {mean_key: None for mean_key in MISCOPE_MEAN_KEYS}
 
     baseline_data = {
         "predicted_wgm": gsize_m, 
@@ -379,7 +535,12 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
         "optimal_tflops": optimal_tflops,
         "optimal_ms": optimal_ms,
         "optimal_l2_hit_rate": optimal_l2_hit_rate,
+        "baseline_runs": baseline_runs,
     }
+
+    for mean_key in MISCOPE_MEAN_KEYS:
+        baseline_data[f"predicted_{mean_key}"] = predicted_metrics.get(mean_key)
+        baseline_data[f"optimal_{mean_key}"] = optimal_metrics.get(mean_key)
 
     print("Baseline results: ")
     print(json.dumps(baseline_data, indent=4))
@@ -423,7 +584,18 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
 
             
             # Run benchmark
-            result = run_tessera_benchmark(m, n, k, ordering0, ordering1, wgm, wgn, dtype)
+            result = run_tessera_benchmark(
+                m,
+                n,
+                k,
+                ordering0,
+                ordering1,
+                wgm,
+                wgn,
+                dtype,
+                warmup_ms,
+                rep_ms,
+            )
             
             if result is not None:
                 # Extract benchmark and profiler data
@@ -444,6 +616,8 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
                     "init_type": benchmark_data["init_type"],
                     "profiler_data": profiler_data
                 }
+                for mean_key in MISCOPE_MEAN_KEYS:
+                    sweep_result[mean_key] = benchmark_data.get(mean_key)
                 sweep_results.append(sweep_result)
                 
                 # Add to CSV data
@@ -457,6 +631,8 @@ def sweep_matrix_problem(m, n, k, arch, dtype="float16", max_wgm=16, max_wgn=16,
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
                     "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
                 }
+                for mean_key in MISCOPE_MEAN_KEYS:
+                    csv_row[mean_key] = benchmark_data.get(mean_key)
                 csv_data.append(csv_row)
 
                 print(json.dumps(result, indent=4))
@@ -489,6 +665,8 @@ def main():
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
     parser.add_argument("--arch", type=str, required=True)
+    parser.add_argument("--warmup-ms", type=int, default=10, help="Warmup duration (ms) for benchmark runs")
+    parser.add_argument("--rep-ms", type=int, default=10, help="Measurement duration (ms) for benchmark runs")
     
     args = parser.parse_args()
     
@@ -515,7 +693,18 @@ def main():
         
         try:
             # Run sweep with progressive saving
-            results, csv_data = sweep_matrix_problem(m, n, k, args.arch, args.dtype, args.max_wgm, args.max_wgn, args.results_dir)
+            results, csv_data = sweep_matrix_problem(
+                m,
+                n,
+                k,
+                args.arch,
+                args.dtype,
+                args.max_wgm,
+                args.max_wgn,
+                args.results_dir,
+                args.warmup_ms,
+                args.rep_ms,
+            )
             
             # Print summary
             sweep_results = results["sweep_results"]
