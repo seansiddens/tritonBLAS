@@ -665,8 +665,8 @@ def main():
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
     parser.add_argument("--arch", type=str, required=True)
-    parser.add_argument("--warmup-ms", type=int, default=10, help="Warmup duration (ms) for benchmark runs")
-    parser.add_argument("--rep-ms", type=int, default=10, help="Measurement duration (ms) for benchmark runs")
+    parser.add_argument("--warmup-ms", type=int, default=20, help="Warmup duration (ms) for benchmark runs")
+    parser.add_argument("--rep-ms", type=int, default=100, help="Measurement duration (ms) for benchmark runs")
     
     args = parser.parse_args()
     
