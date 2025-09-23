@@ -5,6 +5,7 @@ Reads matrix problems from CSV and sweeps through orderings and workgroup sizes.
 """
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -27,6 +28,90 @@ MISCOPE_COLUMNS = [
 ] + [f"curr_gfxclks{i}" for i in range(8)]
 
 MISCOPE_MEAN_KEYS = [f"{col}_mean" for col in MISCOPE_COLUMNS]
+MISCOPE_OUTPUT_DIR = "miscope_metrics"
+
+
+def compute_sweep_summary(metadata, sweep_results):
+    """Build summary information for sweep results."""
+    summary = {
+        "best_schedule": None,
+        "best_schedule_index": None,
+        "best_tflops": None,
+        "speedup_vs_predicted": None,
+        "speedup_vs_optimal": None,
+        "num_sweep_results": len(sweep_results or [])
+    }
+
+    if not sweep_results:
+        return summary
+
+    def tflops_key(entry):
+        value = entry.get("tflops")
+        return value if value is not None else float("-inf")
+
+    best_idx, best_entry = max(
+        ((idx, entry) for idx, entry in enumerate(sweep_results, start=1)),
+        key=lambda item: tflops_key(item[1])
+    )
+
+    baseline_data = (metadata or {}).get("baseline_data", {})
+    predicted_tflops = baseline_data.get("predicted_tflops")
+    optimal_tflops = baseline_data.get("optimal_tflops")
+    best_tflops = best_entry.get("tflops")
+
+    summary.update({
+        "best_schedule_index": best_idx,
+        "best_tflops": best_tflops,
+        "best_schedule": copy.deepcopy(best_entry)
+    })
+
+    if best_tflops is not None and predicted_tflops and predicted_tflops > 0:
+        summary["speedup_vs_predicted"] = best_tflops / predicted_tflops
+
+    if best_tflops is not None and optimal_tflops and optimal_tflops > 0:
+        summary["speedup_vs_optimal"] = best_tflops / optimal_tflops
+
+    return summary
+
+
+def sanitize_for_filename(value):
+    return ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in str(value))
+
+
+def build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype):
+    problem_folder = os.path.join(
+        MISCOPE_OUTPUT_DIR,
+        f"m{m}_n{n}_k{k}"
+    )
+
+    ordering_name_0 = sanitize_for_filename(get_ordering_name(ordering0))
+    ordering_name_1 = sanitize_for_filename(get_ordering_name(ordering1))
+
+    parts = [
+        f"arch{sanitize_for_filename(arch)}",
+        f"o{ordering_name_0}_{ordering_name_1}",
+        f"wgm{wgm}",
+        f"wgn{wgn}",
+        f"dtype{sanitize_for_filename(dtype)}"
+    ]
+    filename = "_".join(parts)
+    return os.path.join(problem_folder, filename)
+
+
+def build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype):
+    problem_folder = os.path.join(
+        MISCOPE_OUTPUT_DIR,
+        f"m{m}_n{n}_k{k}"
+    )
+
+    parts = [
+        f"arch{sanitize_for_filename(arch)}",
+        "baseline",
+        f"wgm{wgm}",
+        f"dtype{sanitize_for_filename(dtype)}"
+    ]
+    filename = "_".join(parts)
+    return os.path.join(problem_folder, filename)
 
 def get_all_wgm_wgn_combinations(max_wgm=8, max_wgn=8, num_pid_m=None, num_pid_n=None):
     """Generate all WGM and WGN combinations from 1 to max values, constrained by grid dimensions."""
@@ -137,6 +222,10 @@ def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gp
     """Run the benchmark through miscope and return process result and selected metric means."""
     bench_cmd_str = " ".join(shlex.quote(str(arg)) for arg in bench_cmd)
 
+    prefix_dir = os.path.dirname(metrics_prefix)
+    if prefix_dir:
+        os.makedirs(os.path.join(base_dir, prefix_dir), exist_ok=True)
+
     metrics_candidates = [
         os.path.join(base_dir, f"{metrics_prefix}_0"),
         os.path.join(base_dir, f"{metrics_prefix}.csv_0"),
@@ -198,9 +287,12 @@ def run_tessera_benchmark(
     ordering1,
     wgm,
     wgn,
+    arch,
     dtype="float16",
-    warmup_ms=10,
-    rep_ms=10,
+    bench_warmup_ms=10,
+    bench_rep_ms=10,
+    prof_warmup_ms=20,
+    prof_rep_ms=20,
 ):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
@@ -217,12 +309,13 @@ def run_tessera_benchmark(
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", str(warmup_ms),
-            "--rep", str(rep_ms)
+            "--warmup", str(bench_warmup_ms),
+            "--rep", str(bench_rep_ms)
         ]
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir)
+        metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix)
         if miscope_result is None:
             return None
         if metric_means.get("curr_gfxclk_mean") is None:
@@ -241,14 +334,14 @@ def run_tessera_benchmark(
             return None
 
         rocprof_cmd = [
-            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "-f", "csv", "--",
             sys.executable, "run_benchmark.py",
             str(m), str(n), str(k),
             str(ordering0), str(ordering1),
             str(wgm), str(wgn),
             "--dtype", dtype,
-            "--warmup", str(warmup_ms),
-            "--rep", str(rep_ms)
+            "--warmup", str(prof_warmup_ms),
+            "--rep", str(prof_rep_ms)
         ]
         
         print(f"Running: {' '.join(rocprof_cmd)}")
@@ -295,9 +388,12 @@ def run_baseline_benchmark(
     n,
     k,
     wgm,
+    arch,
     dtype="bfloat16",
-    warmup_ms=10,
-    rep_ms=10,
+    bench_warmup_ms=10,
+    bench_rep_ms=10,
+    prof_warmup_ms=20,
+    prof_rep_ms=20,
 ):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
@@ -313,13 +409,14 @@ def run_baseline_benchmark(
             "0", "0",
             str(wgm), "1",
             "--dtype", dtype,
-            "--warmup", str(warmup_ms),
-            "--rep", str(rep_ms),
+            "--warmup", str(bench_warmup_ms),
+            "--rep", str(bench_rep_ms),
             "--baseline"            
         ]
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir)
+        metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix)
         if miscope_result is None:
             return None
         if metric_means.get("curr_gfxclk_mean") is None:
@@ -339,14 +436,14 @@ def run_baseline_benchmark(
             return None
 
         rocprof_cmd = [
-            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "-f", "csv", "--",
             sys.executable, "run_benchmark.py",
             str(m), str(n), str(k),
             "0", "0",
             str(wgm), "1",
             "--dtype", dtype,
-            "--warmup", str(warmup_ms),
-            "--rep", str(rep_ms),
+            "--warmup", str(prof_warmup_ms),
+            "--rep", str(prof_rep_ms),
             "--baseline"
         ]
         
@@ -390,6 +487,10 @@ def run_baseline_benchmark(
 
 def save_progressive_results(results, csv_data, json_path, csv_path):
     """Save results progressively to avoid data loss."""
+    metadata = results.get("metadata", {})
+    sweep_results = results.get("sweep_results", [])
+    results["summary"] = compute_sweep_summary(metadata, sweep_results)
+
     # Save JSON
     with open(json_path, 'w') as f:
         json.dump(results, f, indent=2)
@@ -416,8 +517,10 @@ def sweep_matrix_problem(
     max_wgm=16,
     max_wgn=16,
     results_dir="results",
-    warmup_ms=10,
-    rep_ms=10,
+    bench_warmup_ms=10,
+    bench_rep_ms=10,
+    prof_warmup_ms=20,
+    prof_rep_ms=20,
 ):
     """Sweep all configurations for a single matrix problem with progressive saving."""
     print(f"\nSweeping matrix problem: M={m}, N={n}, K={k}")
@@ -432,8 +535,8 @@ def sweep_matrix_problem(
     # Get all workgroup combinations (constrained by grid dimensions)
     num_pid_m = math.ceil(m / BLK_M)
     num_pid_n = math.ceil(n / BLK_N)
-    # wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
-    wgm_wgn_combinations = [(4, 4), (4, 8), (8, 4), (6, 6)]
+    wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
+    # wgm_wgn_combinations = [(4, 4), (4, 8), (8, 4), (6, 6)]
     print(f"Num wgm/wgn combinations to test: {len(wgm_wgn_combinations)}")
     
     # All ordering combinations
@@ -457,22 +560,26 @@ def sweep_matrix_problem(
 
     # Get optimal baseline:
     baseline_results = []
+    # baseline_wgm_values = [1, 2, 4, 6, 8, 16]
     baseline_wgm_values = [1, 2, 4, 6, 8, 16]
     print(f"Computing baseline perf for WGMs: {baseline_wgm_values}...")
     for wgm in baseline_wgm_values:
-        # if wgm > num_pid_m or wgm > num_pid_n:
-        #     break
         baseline_result = run_baseline_benchmark(
             m,
             n,
             k,
             wgm,
+            arch,
             dtype=dtype,
-            warmup_ms=warmup_ms,
-            rep_ms=rep_ms,
+            bench_warmup_ms=bench_warmup_ms,
+            bench_rep_ms=bench_rep_ms,
+            prof_warmup_ms=prof_warmup_ms,
+            prof_rep_ms=prof_rep_ms,
         )
         if baseline_result is not None:
             baseline_results.append(baseline_result)
+        else: 
+            sys.exit(1)
 
     optimal_l2_hit_rate = -1
     optimal_tflops = -1
@@ -592,9 +699,12 @@ def sweep_matrix_problem(
                 ordering1,
                 wgm,
                 wgn,
+                arch,
                 dtype,
-                warmup_ms,
-                rep_ms,
+                bench_warmup_ms,
+                bench_rep_ms,
+                prof_warmup_ms,
+                prof_rep_ms,
             )
             
             if result is not None:
@@ -665,8 +775,10 @@ def main():
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
     parser.add_argument("--arch", type=str, required=True)
-    parser.add_argument("--warmup-ms", type=int, default=20, help="Warmup duration (ms) for benchmark runs")
-    parser.add_argument("--rep-ms", type=int, default=100, help="Measurement duration (ms) for benchmark runs")
+    parser.add_argument("--bench-warmup-ms", type=int, default=50, help="Warmup duration (ms) for miscope (non-rocprof) benchmark runs")
+    parser.add_argument("--bench-rep-ms", type=int, default=1000, help="Measurement duration (ms) for miscope (non-rocprof) benchmark runs")
+    parser.add_argument("--prof-warmup-ms", type=int, default=50, help="Warmup duration (ms) for rocprof benchmark runs")
+    parser.add_argument("--prof-rep-ms", type=int, default=100, help="Measurement duration (ms) for rocprof benchmark runs")
     
     args = parser.parse_args()
     
@@ -702,14 +814,16 @@ def main():
                 args.max_wgm,
                 args.max_wgn,
                 args.results_dir,
-                args.warmup_ms,
-                args.rep_ms,
+                args.bench_warmup_ms,
+                args.bench_rep_ms,
+                args.prof_warmup_ms,
+                args.prof_rep_ms,
             )
             
             # Print summary
             sweep_results = results["sweep_results"]
-            successful_runs = len([r for r in sweep_results if r["number_of_errors"] == 0])
-            print(f"Summary: {successful_runs}/{len(sweep_results)} runs successful (0 errors)")
+            # successful_runs = len([r for r in sweep_results if r["number_of_errors"] == 0])
+            # print(f"Summary: {successful_runs}/{len(sweep_results)} runs successful (0 errors)")
             
             if sweep_results:
                 best_tflops = max(r["tflops"] for r in sweep_results)

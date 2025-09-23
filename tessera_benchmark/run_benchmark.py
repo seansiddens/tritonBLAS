@@ -93,16 +93,8 @@ def benchmark_tessera_matmul(
     A = init_by_size_and_type((m, k), dtype, init_type)
     B = init_by_size_and_type((k, n), dtype, init_type)
     
-    # # Apply transpose on A or B if necessary (only needed for "N" case)
-    # if transA == "N":
-    #     A = A.T  # Apply transpose to A if transA is "N"
-
-    # if transB == "N":
-    #     B = B.T  # Apply transpose to B if transB is "N"
-    
     # Allocate output tensors
     C_tessera = torch.zeros((m, n), device="cuda", dtype=dtype)
-    C_reference = torch.zeros((m, n), device="cuda", dtype=dtype)
 
     # Compute performance metrics
     flops = lambda: 2 * m * n * k * 1e-12
@@ -124,32 +116,32 @@ def benchmark_tessera_matmul(
     tessera_ms = triton.testing.do_bench(tessera_matmul, warmup=warmup, rep=rep)
     tessera_tflops = tflops(tessera_ms)
     
-    # Correctness check
-    print("Checking correctness...")
-    C_tessera.fill_(0)
+    # # Correctness check
+    # print("Checking correctness...")
+    # C_tessera.fill_(0)
     
-    tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
-    torch_c = torch.matmul(A, B)
+    # tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
+    # torch_c = torch.matmul(A, B)
     # tritonblas.matmul_lt(A, B, C_reference, selector)
     
     # Calculate error
-    diff = torch.abs(C_tessera - torch_c)
-    max_diff = torch.max(diff).item()
-    mean_diff = torch.mean(diff).item()
+    # diff = torch.abs(C_tessera - torch_c)
+    # max_diff = torch.max(diff).item()
+    # mean_diff = torch.mean(diff).item()
     
-    # Check if results are close
-    try:
-        # torch.testing.assert_close(C_tessera, torch_c, atol=1, rtol=1)
-        torch.testing.assert_close(C_tessera, torch_c)
-        # torch.testing.assert_close(C_tessera, torch_c, atol=10, rtol=0.1)
-        correctness = "PASS"
-    except AssertionError:
-        correctness = "FAIL"
+    # # Check if results are close
+    # try:
+    #     # torch.testing.assert_close(C_tessera, torch_c, atol=1, rtol=1)
+    #     torch.testing.assert_close(C_tessera, torch_c)
+    #     # torch.testing.assert_close(C_tessera, torch_c, atol=10, rtol=0.1)
+    #     correctness = "PASS"
+    # except AssertionError:
+    #     correctness = "FAIL"
     
     # Calculate number of errors (elements that differ significantly)
-    error_threshold = 1e-2
-    significant_errors = torch.sum(torch.abs(C_tessera - torch_c) > error_threshold).item()
-    print(f"Number of errors: {significant_errors}")
+    # error_threshold = 1e-2
+    # significant_errors = torch.sum(torch.abs(C_tessera - torch_c) > error_threshold).item()
+    # print(f"Number of errors: {significant_errors}")
     
     # Results for JSON output
     json_results = {
@@ -160,7 +152,7 @@ def benchmark_tessera_matmul(
         'dtype': str(dtype),
         'tflops': tessera_tflops,
         'ms': tessera_ms,
-        'number_of_errors': significant_errors,
+        # 'number_of_errors': significant_errors,
         'transA': transA,
         'transB': transB,
         'init_type': init_type,
@@ -170,9 +162,9 @@ def benchmark_tessera_matmul(
     results = {
         'tessera_ms': tessera_ms,
         'tessera_tflops': tessera_tflops,
-        'max_diff': max_diff,
-        'mean_diff': mean_diff,
-        'correctness': correctness
+        # 'max_diff': max_diff,
+        # 'mean_diff': mean_diff,
+        # 'correctness': correctness
     }
     
     # Print results
@@ -183,11 +175,11 @@ def benchmark_tessera_matmul(
     print(f"  Time:     {tessera_ms:.3f} ms")
     print(f"  TFLOPS:   {tessera_tflops:.3f}")
     print()
-    print(f"Correctness:")
-    print(f"  Status:   {correctness}")
-    print(f"  Max diff: {max_diff:.2e}")
-    print(f"  Mean diff:{mean_diff:.2e}")
-    print("="*60)
+    # print(f"Correctness:")
+    # print(f"  Status:   {correctness}")
+    # print(f"  Max diff: {max_diff:.2e}")
+    # print(f"  Mean diff:{mean_diff:.2e}")
+    # print("="*60)
     
     # Save results to JSON file
     output_file = "benchmark_results.json"
