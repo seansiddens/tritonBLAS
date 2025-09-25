@@ -52,7 +52,7 @@ def benchmark_tessera_matmul(
     m, n, k, 
     ordering0, ordering1, 
     wgm, wgn, 
-    dtype=torch.float16, warmup=20, rep=20, transA=False, transB=False):
+    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T"):
     """
     Benchmark tessera matmul and compare with reference implementation.
     
@@ -74,9 +74,6 @@ def benchmark_tessera_matmul(
     print(f"  Data type: {dtype}")
     print()
 
-    transA = "N"
-    transB = "N"
-
     # Adjust dimensions for transposition and apply tensor.T if needed
     if transA == "T":
         A_size = (m, k)  # A is MxK
@@ -90,8 +87,15 @@ def benchmark_tessera_matmul(
 
     # Initialize tensors with the appropriate dimensions
     init_type = "randn"
-    A = init_by_size_and_type((m, k), dtype, init_type)
-    B = init_by_size_and_type((k, n), dtype, init_type)
+    A = init_by_size_and_type(A_size, dtype, init_type)
+    B = init_by_size_and_type(B_size, dtype, init_type)
+
+    # Apply transpose on A or B if necessary (only needed for "N" case)
+    if transA == "N":
+        A = A.T  # Apply transpose to A if transA is "N"
+
+    if transB == "N":
+        B = B.T  # Apply transpose to B if transB is "N"
     
     # Allocate output tensors
     C_tessera = torch.zeros((m, n), device="cuda", dtype=dtype)
@@ -115,33 +119,6 @@ def benchmark_tessera_matmul(
     tessera_matmul = lambda: tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn) 
     tessera_ms = triton.testing.do_bench(tessera_matmul, warmup=warmup, rep=rep)
     tessera_tflops = tflops(tessera_ms)
-    
-    # # Correctness check
-    # print("Checking correctness...")
-    # C_tessera.fill_(0)
-    
-    # tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn)
-    # torch_c = torch.matmul(A, B)
-    # tritonblas.matmul_lt(A, B, C_reference, selector)
-    
-    # Calculate error
-    # diff = torch.abs(C_tessera - torch_c)
-    # max_diff = torch.max(diff).item()
-    # mean_diff = torch.mean(diff).item()
-    
-    # # Check if results are close
-    # try:
-    #     # torch.testing.assert_close(C_tessera, torch_c, atol=1, rtol=1)
-    #     torch.testing.assert_close(C_tessera, torch_c)
-    #     # torch.testing.assert_close(C_tessera, torch_c, atol=10, rtol=0.1)
-    #     correctness = "PASS"
-    # except AssertionError:
-    #     correctness = "FAIL"
-    
-    # Calculate number of errors (elements that differ significantly)
-    # error_threshold = 1e-2
-    # significant_errors = torch.sum(torch.abs(C_tessera - torch_c) > error_threshold).item()
-    # print(f"Number of errors: {significant_errors}")
     
     # Results for JSON output
     json_results = {
@@ -192,15 +169,12 @@ def benchmark_tessera_matmul(
 def benchmark_baseline_matmul(
     m, n, k, 
     wgm,
-    dtype=torch.float16, warmup=20, rep=20, transA=False, transB=True):
+    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T"):
     print(f"Benchmarking baseline matmul:")
     print(f"  Dimensions: M={m}, N={n}, K={k}")
     print(f"  Workgroup: WGM={wgm}")
     print(f"  Data type: {dtype}")
     print()
-
-    transA = "N"
-    transB = "N"
 
     # Adjust dimensions for transposition and apply tensor.T if needed
     if transA == "T":
@@ -212,23 +186,21 @@ def benchmark_baseline_matmul(
         B_size = (k, n)  # B is KxN
     else:
         B_size = (n, k)  # B is NxK (we will later transpose it with .T)
+    
+    print(f"A_size: {A_size}")
+    print(f"B_size: {B_size}")
 
     # Initialize tensors with the appropriate dimensions
     init_type = "randn"
     A = init_by_size_and_type(A_size, dtype, init_type)
     B = init_by_size_and_type(B_size, dtype, init_type)
-    
+
     # Apply transpose on A or B if necessary (only needed for "N" case)
     if transA == "N":
         A = A.T  # Apply transpose to A if transA is "N"
 
     if transB == "N":
         B = B.T  # Apply transpose to B if transB is "N"
-
-    # Initialize tensors with the appropriate dimensions
-    init_type = "randn"
-    A = init_by_size_and_type((m, k), dtype, init_type)
-    B = init_by_size_and_type((k, n), dtype, init_type)
     
     # Allocate output tensors
     C_reference = torch.zeros((m, n), device="cuda", dtype=dtype)
@@ -285,8 +257,6 @@ def main():
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16", "float32"], help="Data type")
     parser.add_argument("--warmup", type=int, default=20, help="Warmup time (in ms)")
     parser.add_argument("--rep", type=int, default=20, help="Rep time (in ms)")
-    parser.add_argument("--transA", action="store_true")
-    parser.add_argument("--transB", action="store_true")
     parser.add_argument("--baseline", action="store_true", help="Run the tritonblas matmul baseline. Will use wgm value as gsize_m")
     
     args = parser.parse_args()
@@ -298,7 +268,8 @@ def main():
         "float32": torch.float32
     }
     dtype = dtype_map[args.dtype]
-    args.transB = True
+    transA = "T"
+    transB = "T"
 
     if not args.baseline:
         # Run benchmark
@@ -309,8 +280,8 @@ def main():
             dtype=dtype,
             warmup=args.warmup,
             rep=args.rep,
-            transA=args.transA,
-            transB=args.transB
+            transA=transA,
+            transB=transB
         )
     
         if results is None:
@@ -327,8 +298,8 @@ def main():
             dtype=dtype,
             warmup=args.warmup,
             rep=args.rep,
-            transA=args.transA,
-            transB=args.transB
+            transA=transA,
+            transB=transB
         )
     
         if results is None:
