@@ -334,7 +334,7 @@ def run_tessera_benchmark(
             return None
 
         rocprof_cmd = [
-            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "-f", "csv", "--",
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
             sys.executable, "run_benchmark.py",
             str(m), str(n), str(k),
             str(ordering0), str(ordering1),
@@ -436,7 +436,7 @@ def run_baseline_benchmark(
             return None
 
         rocprof_cmd = [
-            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "-f", "csv", "--",
+            "rocprofv3", "-i", "counters.txt", "-o", "tessera_benchmark", "--",
             sys.executable, "run_benchmark.py",
             str(m), str(n), str(k),
             "0", "0",
@@ -767,9 +767,208 @@ def sweep_matrix_problem(
     
     return results, csv_data
 
+def run_single_configuration(
+    m, n, k, wgm, wgn, arch, dtype="bfloat16",
+    ordering0=0, ordering1=0, baseline_only=False,
+    results_dir="results",
+    bench_warmup_ms=50, bench_rep_ms=1000,
+    prof_warmup_ms=50, prof_rep_ms=100
+):
+    """Run a single configuration with profiling and save results."""
+    print(f"\nRunning single configuration:")
+    print(f"  Dimensions: M={m}, N={n}, K={k}")
+    print(f"  Workgroup: WGM={wgm}, WGN={wgn}")
+    print(f"  Ordering: ({ordering0}, {ordering1})")
+    print(f"  Architecture: {arch}")
+    print(f"  Data type: {dtype}")
+    print(f"  Baseline only: {baseline_only}")
+    print()
+    
+    # Get block dimensions from selector
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, 
+                                               torch.float16 if dtype == "float16" else torch.bfloat16 if dtype == "bfloat16" else torch.float32,
+                                               torch.float16 if dtype == "float16" else torch.bfloat16 if dtype == "bfloat16" else torch.float32,
+                                               torch.float16 if dtype == "float16" else torch.bfloat16 if dtype == "bfloat16" else torch.float32)
+    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+    
+    print(f"  Block sizes: BLK_M={BLK_M}, BLK_N={BLK_N}, BLK_K={BLK_K}")
+    print(f"  Grid dimensions: {math.ceil(m/BLK_M)} x {math.ceil(n/BLK_N)}")
+    print()
+    
+    # Generate filenames
+    if baseline_only:
+        json_filename = f"single_config_baseline_m{m}_n{n}_k{k}_wgm{wgm}_{arch}.json"
+        csv_filename = f"single_config_baseline_m{m}_n{n}_k{k}_wgm{wgm}_{arch}.csv"
+    else:
+        json_filename = f"single_config_tessera_m{m}_n{n}_k{k}_o{ordering0}_{ordering1}_wgm{wgm}_wgn{wgn}_{arch}.json"
+        csv_filename = f"single_config_tessera_m{m}_n{n}_k{k}_o{ordering0}_{ordering1}_wgm{wgm}_wgn{wgn}_{arch}.csv"
+    
+    json_path = os.path.join(results_dir, json_filename)
+    csv_path = os.path.join(results_dir, csv_filename)
+    
+    results = []
+    csv_data = []
+    
+    if baseline_only:
+        # Run baseline benchmark
+        print("Running baseline benchmark...")
+        result = run_baseline_benchmark(
+            m, n, k, wgm, arch, dtype,
+            bench_warmup_ms, bench_rep_ms,
+            prof_warmup_ms, prof_rep_ms
+        )
+        
+        if result is not None:
+            profiler_data = result["profiler_data"]
+            benchmark_data = result["benchmark_data"]
+            
+            # Create result entry
+            result_entry = {
+                "wgm": benchmark_data.get("wgm"),
+                "tflops": benchmark_data.get("tflops"),
+                "ms": benchmark_data.get("ms"),
+                "transA": benchmark_data["transA"],
+                "transB": benchmark_data["transB"],
+                "init_type": benchmark_data["init_type"],
+                "profiler_data": profiler_data
+            }
+            
+            # Add miscope metrics
+            for mean_key in MISCOPE_MEAN_KEYS:
+                result_entry[mean_key] = benchmark_data.get(mean_key)
+            
+            results.append(result_entry)
+            
+            # Create CSV row
+            csv_row = {
+                "wgm": benchmark_data.get("wgm"),
+                "tflops": benchmark_data.get("tflops"),
+                "ms": benchmark_data.get("ms"),
+                "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
+            }
+            for mean_key in MISCOPE_MEAN_KEYS:
+                csv_row[mean_key] = benchmark_data.get(mean_key)
+            csv_data.append(csv_row)
+            
+            print(f"Baseline results:")
+            print(f"  TFLOPS: {benchmark_data.get('tflops', 0):.3f}")
+            print(f"  Time: {benchmark_data.get('ms', 0):.3f} ms")
+            if profiler_data:
+                print(f"  L2 Hit Rate: {profiler_data.get('hit_rate_pct', 0):.2f}%")
+        else:
+            print("Baseline benchmark failed!")
+            return None, None
+    
+    else:
+        # Run tessera benchmark
+        print("Running tessera benchmark...")
+        result = run_tessera_benchmark(
+            m, n, k, ordering0, ordering1, wgm, wgn, arch, dtype,
+            bench_warmup_ms, bench_rep_ms, prof_warmup_ms, prof_rep_ms
+        )
+        
+        if result is not None:
+            profiler_data = result["profiler_data"]
+            benchmark_data = result["benchmark_data"]
+            
+            # Create result entry
+            result_entry = {
+                "ordering_0": get_ordering_name(ordering0),
+                "ordering_1": get_ordering_name(ordering1),
+                "WGM": wgm,
+                "WGN": wgn,
+                "tflops": benchmark_data.get("tflops", 0),
+                "ms": benchmark_data.get("ms", 0),
+                "transA": benchmark_data["transA"],
+                "transB": benchmark_data["transB"],
+                "init_type": benchmark_data["init_type"],
+                "profiler_data": profiler_data
+            }
+            
+            # Add miscope metrics
+            for mean_key in MISCOPE_MEAN_KEYS:
+                result_entry[mean_key] = benchmark_data.get(mean_key)
+            
+            results.append(result_entry)
+            
+            # Create CSV row
+            csv_row = {
+                "ordering_0": get_ordering_name(ordering0),
+                "ordering_1": get_ordering_name(ordering1),
+                "WGM": wgm,
+                "WGN": wgn,
+                "tflops": benchmark_data.get("tflops", 0),
+                "ms": benchmark_data.get("ms", 0),
+                "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
+            }
+            for mean_key in MISCOPE_MEAN_KEYS:
+                csv_row[mean_key] = benchmark_data.get(mean_key)
+            csv_data.append(csv_row)
+            
+            print(f"Tessera results:")
+            print(f"  TFLOPS: {benchmark_data.get('tflops', 0):.3f}")
+            print(f"  Time: {benchmark_data.get('ms', 0):.3f} ms")
+            if profiler_data:
+                print(f"  L2 Hit Rate: {profiler_data.get('hit_rate_pct', 0):.2f}%")
+        else:
+            print("Tessera benchmark failed!")
+            return None, None
+    
+    # Create metadata
+    metadata = {
+        "matrix_dimensions": {"m": m, "n": n, "k": k},
+        "block_dimensions": {"BLK_M": BLK_M, "BLK_N": BLK_N, "BLK_K": BLK_K},
+        "grid": {"num_pid_m": math.ceil(m / BLK_M), "num_pid_n": math.ceil(n / BLK_N)},
+        "arch": arch,
+        "dtype": dtype,
+        "single_config": True,
+        "baseline_only": baseline_only
+    }
+    
+    if not baseline_only:
+        metadata.update({
+            "ordering0": ordering0,
+            "ordering1": ordering1,
+            "wgm": wgm,
+            "wgn": wgn
+        })
+    else:
+        metadata.update({
+            "wgm": wgm
+        })
+    
+    # Save results
+    final_results = {
+        "metadata": metadata,
+        "results": results
+    }
+    
+    # Save JSON
+    with open(json_path, 'w') as f:
+        json.dump(final_results, f, indent=2)
+    
+    # Save CSV
+    if csv_data:
+        with open(csv_path, 'w', newline='') as f:
+            if baseline_only:
+                fieldnames = ["wgm", "tflops", "ms"]
+            else:
+                fieldnames = ["ordering_0", "ordering_1", "WGM", "WGN", "tflops", "ms"]
+            fieldnames.extend(MISCOPE_MEAN_KEYS)
+            fieldnames.append("l2_hit_rate_pct")
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(csv_data)
+    
+    print(f"\nResults saved to:")
+    print(f"  JSON: {json_path}")
+    print(f"  CSV: {csv_path}")
+    
+    return final_results, csv_data
+
 def main():
     parser = argparse.ArgumentParser(description="Sweep tessera matmul configurations")
-    parser.add_argument("csv_file", help="CSV file with matrix problems (m,n,k)")
+    parser.add_argument("csv_file", nargs='?', help="CSV file with matrix problems (m,n,k) - required for sweep mode")
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"], help="Data type")
     parser.add_argument("--max-wgm", type=int, default=8, help="Maximum WGM value")
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
@@ -780,66 +979,122 @@ def main():
     parser.add_argument("--prof-warmup-ms", type=int, default=50, help="Warmup duration (ms) for rocprof benchmark runs")
     parser.add_argument("--prof-rep-ms", type=int, default=100, help="Measurement duration (ms) for rocprof benchmark runs")
     
+    # Single configuration mode arguments
+    parser.add_argument("--single-config", action="store_true", help="Run single configuration instead of sweep")
+    parser.add_argument("--m", type=int, help="Matrix M dimension (required for single config)")
+    parser.add_argument("--n", type=int, help="Matrix N dimension (required for single config)")
+    parser.add_argument("--k", type=int, help="Matrix K dimension (required for single config)")
+    parser.add_argument("--wgm", type=int, help="Workgroup M dimension (required for single config)")
+    parser.add_argument("--wgn", type=int, help="Workgroup N dimension (optional for single config, defaults to 1)")
+    parser.add_argument("--ordering0", type=int, choices=[0,1,2,3], default=0, help="Ordering0 (default: 0)")
+    parser.add_argument("--ordering1", type=int, choices=[0,1,2,3], default=0, help="Ordering1 (default: 0)")
+    parser.add_argument("--baseline-only", action="store_true", help="Run only baseline (no tessera) for single config")
+    
     args = parser.parse_args()
     
     # Create results directory
     os.makedirs(args.results_dir, exist_ok=True)
     
-    # Read matrix problems from CSV
-    matrix_problems = []
-    with open(args.csv_file, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            m = int(row['m'])
-            n = int(row['n'])
-            k = int(row['k'])
-            matrix_problems.append((m, n, k))
-    
-    print(f"Found {len(matrix_problems)} matrix problems in {args.csv_file}")
-    
-    # Process each matrix problem
-    for problem_idx, (m, n, k) in enumerate(matrix_problems):
-        print(f"\n{'='*80}")
-        print(f"Processing problem {problem_idx+1}/{len(matrix_problems)}: M={m}, N={n}, K={k}")
-        print(f"{'='*80}")
+    # Handle single configuration mode
+    if args.single_config:
+        # Validate required arguments for single config
+        if args.m is None or args.n is None or args.k is None or args.wgm is None:
+            print("Error: For single configuration mode, --m, --n, --k, and --wgm are required")
+            sys.exit(1)
+        
+        # Set default wgn if not provided
+        wgn = args.wgn if args.wgn is not None else 1
         
         try:
-            # Run sweep with progressive saving
-            results, csv_data = sweep_matrix_problem(
-                m,
-                n,
-                k,
-                args.arch,
-                args.dtype,
-                args.max_wgm,
-                args.max_wgn,
-                args.results_dir,
-                args.bench_warmup_ms,
-                args.bench_rep_ms,
-                args.prof_warmup_ms,
-                args.prof_rep_ms,
+            # Run single configuration
+            results, csv_data = run_single_configuration(
+                args.m, args.n, args.k, args.wgm, wgn, args.arch, args.dtype,
+                args.ordering0, args.ordering1, args.baseline_only,
+                args.results_dir, args.bench_warmup_ms, args.bench_rep_ms,
+                args.prof_warmup_ms, args.prof_rep_ms
             )
             
-            # Print summary
-            sweep_results = results["sweep_results"]
-            # successful_runs = len([r for r in sweep_results if r["number_of_errors"] == 0])
-            # print(f"Summary: {successful_runs}/{len(sweep_results)} runs successful (0 errors)")
-            
-            if sweep_results:
-                best_tflops = max(r["tflops"] for r in sweep_results)
-                best_config = next(r for r in sweep_results if r["tflops"] == best_tflops)
-                print(f"Best TFLOPS: {best_tflops:.3f} (Ordering=({best_config['ordering_0']},{best_config['ordering_1']}), WGM={best_config['WGM']}, WGN={best_config['WGN']})")
-            
-            print(f"Problem {problem_idx+1} completed successfully!")
-            
+            if results is not None:
+                print(f"\nSingle configuration completed successfully!")
+                if results["results"]:
+                    result = results["results"][0]
+                    print(f"Final results:")
+                    print(f"  TFLOPS: {result.get('tflops', 0):.3f}")
+                    print(f"  Time: {result.get('ms', 0):.3f} ms")
+                    if result.get("profiler_data"):
+                        print(f"  L2 Hit Rate: {result['profiler_data'].get('hit_rate_pct', 0):.2f}%")
+            else:
+                print("Single configuration failed!")
+                sys.exit(1)
+                
         except KeyboardInterrupt:
-            print(f"\nInterrupted during problem {problem_idx+1}. Partial results saved.")
-            break
+            print(f"\nInterrupted during single configuration run.")
+            sys.exit(1)
         except Exception as e:
-            print(f"Error processing problem {problem_idx+1}: {e}")
+            print(f"Error running single configuration: {e}")
             sys.exit(1)
     
-    print(f"\nSweep completed! Results saved to {args.results_dir}/")
+    else:
+        # Handle sweep mode
+        if args.csv_file is None:
+            print("Error: CSV file is required for sweep mode")
+            sys.exit(1)
+        
+        # Read matrix problems from CSV
+        matrix_problems = []
+        with open(args.csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                m = int(row['m'])
+                n = int(row['n'])
+                k = int(row['k'])
+                matrix_problems.append((m, n, k))
+        
+        print(f"Found {len(matrix_problems)} matrix problems in {args.csv_file}")
+        
+        # Process each matrix problem
+        for problem_idx, (m, n, k) in enumerate(matrix_problems):
+            print(f"\n{'='*80}")
+            print(f"Processing problem {problem_idx+1}/{len(matrix_problems)}: M={m}, N={n}, K={k}")
+            print(f"{'='*80}")
+            
+            try:
+                # Run sweep with progressive saving
+                results, csv_data = sweep_matrix_problem(
+                    m,
+                    n,
+                    k,
+                    args.arch,
+                    args.dtype,
+                    args.max_wgm,
+                    args.max_wgn,
+                    args.results_dir,
+                    args.bench_warmup_ms,
+                    args.bench_rep_ms,
+                    args.prof_warmup_ms,
+                    args.prof_rep_ms,
+                )
+                
+                # Print summary
+                sweep_results = results["sweep_results"]
+                # successful_runs = len([r for r in sweep_results if r["number_of_errors"] == 0])
+                # print(f"Summary: {successful_runs}/{len(sweep_results)} runs successful (0 errors)")
+                
+                if sweep_results:
+                    best_tflops = max(r["tflops"] for r in sweep_results)
+                    best_config = next(r for r in sweep_results if r["tflops"] == best_tflops)
+                    print(f"Best TFLOPS: {best_tflops:.3f} (Ordering=({best_config['ordering_0']},{best_config['ordering_1']}), WGM={best_config['WGM']}, WGN={best_config['WGN']})")
+                
+                print(f"Problem {problem_idx+1} completed successfully!")
+                
+            except KeyboardInterrupt:
+                print(f"\nInterrupted during problem {problem_idx+1}. Partial results saved.")
+                break
+            except Exception as e:
+                print(f"Error processing problem {problem_idx+1}: {e}")
+                sys.exit(1)
+        
+        print(f"\nSweep completed! Results saved to {args.results_dir}/")
 
 if __name__ == "__main__":
     main()
