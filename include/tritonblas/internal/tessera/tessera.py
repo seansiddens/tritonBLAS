@@ -646,9 +646,6 @@ def transform_cpu(
 @triton.jit()
 def chiplet_transform(index, num_workgroups, num_xcds):
     """
-    Swizzle workgroup assignment across XCDs (eXecute Compute Dies).
-    This is the Triton equivalent of the C++ swizzle_chiplet function.
-    
     Args:
         index: Workgroup index to swizzle
         num_workgroups: Total number of workgroups
