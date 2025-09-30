@@ -19,6 +19,7 @@ import pandas as pd
 import numpy as np
 import math
 
+MISCOPE_GPU_ID = "5"
 MISCOPE_COLUMNS = [
     "curr_gfxclk",
     "curr_socclk",
@@ -315,7 +316,7 @@ def run_tessera_benchmark(
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix)
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
         if miscope_result is None:
             return None
         if metric_means.get("curr_gfxclk_mean") is None:
@@ -416,7 +417,7 @@ def run_baseline_benchmark(
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix)
+        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
         if miscope_result is None:
             return None
         if metric_means.get("curr_gfxclk_mean") is None:
