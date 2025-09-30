@@ -220,7 +220,10 @@ def calculate_tcc_hit_rate(csv_file, kernel_name='persistent_matmul_tessera'):
 
 
 def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gpu_ids="0"):
-    """Run the benchmark through miscope and return process result and selected metric means."""
+    """Run the benchmark through miscope and return process result.
+
+    Note: We purposefully avoid parsing/aggregating any MiScope output here.
+    """
     bench_cmd_str = " ".join(shlex.quote(str(arg)) for arg in bench_cmd)
 
     prefix_dir = os.path.dirname(metrics_prefix)
@@ -258,27 +261,8 @@ def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gp
         print(f"miscope benchmark failed: {result.stderr}")
         return None, None
 
-    metric_means = {f"{col}_mean": None for col in MISCOPE_COLUMNS}
-    for path in metrics_candidates:
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path)
-                for column in MISCOPE_COLUMNS:
-                    mean_key = f"{column}_mean"
-                    if column in df.columns:
-                        series = pd.to_numeric(df[column], errors='coerce')
-                        series = series.replace([np.inf, -np.inf], np.nan).dropna()
-                        if not series.empty:
-                            metric_means[mean_key] = float(series.mean())
-                    else:
-                        if metric_means[mean_key] is None:
-                            print(f"Warning: '{column}' column not found in {path}")
-            except Exception as exc:
-                print(f"Error processing miscope metrics from {path}: {exc}")
-            finally:
-                break
-
-    return result, metric_means
+    # Do not parse or aggregate MiScope results; just return the process result.
+    return result, None
 
 def run_tessera_benchmark(
     m,
@@ -316,11 +300,8 @@ def run_tessera_benchmark(
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
+        miscope_result, _ = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
         if miscope_result is None:
-            return None
-        if metric_means.get("curr_gfxclk_mean") is None:
-            print("Error: Unable to compute curr_gfxclk_mean from miscope output")
             return None
 
         # Read the JSON results from run_benchmark.py
@@ -328,8 +309,6 @@ def run_tessera_benchmark(
         try:
             with open(os.path.join(base_dir, "benchmark_results.json"), "r") as f:
                 benchmark_data = json.load(f)
-            for mean_key, value in metric_means.items():
-                benchmark_data[mean_key] = value
         except Exception as e:
             print(f"Error reading benchmark results: {e}")
             return None
@@ -373,8 +352,7 @@ def run_tessera_benchmark(
                 "transB": benchmark_data["transB"],
                 "init_type": benchmark_data["init_type"]
             }
-            for mean_key in MISCOPE_MEAN_KEYS:
-                combined_benchmark_data[mean_key] = benchmark_data.get(mean_key)
+            # Intentionally exclude aggregated MiScope metrics from saved results
 
             return {
                 "profiler_data": profiler_data,
@@ -417,11 +395,8 @@ def run_baseline_benchmark(
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
-        miscope_result, metric_means = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
+        miscope_result, _ = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
         if miscope_result is None:
-            return None
-        if metric_means.get("curr_gfxclk_mean") is None:
-            print("Error: Unable to compute curr_gfxclk_mean from miscope output for baseline run")
             return None
 
         # Read the JSON results from run_benchmark.py
@@ -429,8 +404,6 @@ def run_baseline_benchmark(
         try:
             with open(os.path.join(base_dir, "benchmark_results.json"), "r") as f:
                 benchmark_data = json.load(f)
-            for mean_key, value in metric_means.items():
-                benchmark_data[mean_key] = value
             print("loaded baseline data")
         except Exception as e:
             print(f"Error reading benchmark results: {e}")
@@ -475,8 +448,7 @@ def run_baseline_benchmark(
                 "transB": benchmark_data["transB"],
                 "init_type": benchmark_data["init_type"]
             }
-            for mean_key in MISCOPE_MEAN_KEYS:
-                combined_benchmark_data[mean_key] = benchmark_data.get(mean_key)
+            # Intentionally exclude aggregated MiScope metrics from saved results
 
             return {
                 "profiler_data": profiler_data,
@@ -503,7 +475,7 @@ def save_progressive_results(results, csv_data, json_path, csv_path):
                 "ordering_0", "ordering_1", "WGM", "WGN",
                 "tflops", "ms", "number_of_errors",
             ]
-            fieldnames.extend(MISCOPE_MEAN_KEYS)
+            # Do not include aggregated MiScope metrics in CSV output
             fieldnames.append("l2_hit_rate_pct")
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -592,13 +564,10 @@ def sweep_matrix_problem(
     predicted_ms = None
 
     baseline_runs = []
-    predicted_metrics = None
-    optimal_metrics = None
 
     for res in baseline_results:
         profiler_data = res["profiler_data"]
         benchmark_data = res["benchmark_data"]
-        metrics_snapshot = {mean_key: benchmark_data.get(mean_key) for mean_key in MISCOPE_MEAN_KEYS}
 
         baseline_entry = {
             "wgm": benchmark_data.get("wgm"),
@@ -607,21 +576,18 @@ def sweep_matrix_problem(
             "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
             "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None
         }
-        baseline_entry.update(metrics_snapshot)
         baseline_runs.append(baseline_entry)
 
         if benchmark_data["wgm"] == gsize_m:
             predicted_tflops = benchmark_data["tflops"]
             predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
             predicted_ms = benchmark_data["ms"]
-            predicted_metrics = metrics_snapshot
         
         if benchmark_data["tflops"] > optimal_tflops:
             optimal_wgm = benchmark_data["wgm"]
             optimal_tflops = benchmark_data["tflops"]
             optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
             optimal_ms = benchmark_data["ms"]
-            optimal_metrics = metrics_snapshot
 
     # Check if predicted values were found
     if predicted_tflops is None:
@@ -629,10 +595,7 @@ def sweep_matrix_problem(
     if optimal_tflops == -1:
         raise RuntimeError("No valid baseline results found - all baseline runs failed")
 
-    if predicted_metrics is None:
-        predicted_metrics = {mean_key: None for mean_key in MISCOPE_MEAN_KEYS}
-    if optimal_metrics is None:
-        optimal_metrics = {mean_key: None for mean_key in MISCOPE_MEAN_KEYS}
+    # Do not track aggregated MiScope metrics
 
     baseline_data = {
         "predicted_wgm": gsize_m, 
@@ -646,9 +609,7 @@ def sweep_matrix_problem(
         "baseline_runs": baseline_runs,
     }
 
-    for mean_key in MISCOPE_MEAN_KEYS:
-        baseline_data[f"predicted_{mean_key}"] = predicted_metrics.get(mean_key)
-        baseline_data[f"optimal_{mean_key}"] = optimal_metrics.get(mean_key)
+    # Exclude aggregated MiScope metrics from baseline data
 
     print("Baseline results: ")
     print(json.dumps(baseline_data, indent=4))
@@ -727,8 +688,6 @@ def sweep_matrix_problem(
                     "init_type": benchmark_data["init_type"],
                     "profiler_data": profiler_data
                 }
-                for mean_key in MISCOPE_MEAN_KEYS:
-                    sweep_result[mean_key] = benchmark_data.get(mean_key)
                 sweep_results.append(sweep_result)
                 
                 # Add to CSV data
@@ -742,8 +701,6 @@ def sweep_matrix_problem(
                     "number_of_errors": benchmark_data.get("number_of_errors", 0),
                     "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
                 }
-                for mean_key in MISCOPE_MEAN_KEYS:
-                    csv_row[mean_key] = benchmark_data.get(mean_key)
                 csv_data.append(csv_row)
 
                 print(json.dumps(result, indent=4))
@@ -833,11 +790,6 @@ def run_single_configuration(
                 "init_type": benchmark_data["init_type"],
                 "profiler_data": profiler_data
             }
-            
-            # Add miscope metrics
-            for mean_key in MISCOPE_MEAN_KEYS:
-                result_entry[mean_key] = benchmark_data.get(mean_key)
-            
             results.append(result_entry)
             
             # Create CSV row
@@ -847,8 +799,6 @@ def run_single_configuration(
                 "ms": benchmark_data.get("ms"),
                 "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
             }
-            for mean_key in MISCOPE_MEAN_KEYS:
-                csv_row[mean_key] = benchmark_data.get(mean_key)
             csv_data.append(csv_row)
             
             print(f"Baseline results:")
@@ -885,11 +835,6 @@ def run_single_configuration(
                 "init_type": benchmark_data["init_type"],
                 "profiler_data": profiler_data
             }
-            
-            # Add miscope metrics
-            for mean_key in MISCOPE_MEAN_KEYS:
-                result_entry[mean_key] = benchmark_data.get(mean_key)
-            
             results.append(result_entry)
             
             # Create CSV row
@@ -902,8 +847,6 @@ def run_single_configuration(
                 "ms": benchmark_data.get("ms", 0),
                 "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
             }
-            for mean_key in MISCOPE_MEAN_KEYS:
-                csv_row[mean_key] = benchmark_data.get(mean_key)
             csv_data.append(csv_row)
             
             print(f"Tessera results:")
@@ -955,7 +898,6 @@ def run_single_configuration(
                 fieldnames = ["wgm", "tflops", "ms"]
             else:
                 fieldnames = ["ordering_0", "ordering_1", "WGM", "WGN", "tflops", "ms"]
-            fieldnames.extend(MISCOPE_MEAN_KEYS)
             fieldnames.append("l2_hit_rate_pct")
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
