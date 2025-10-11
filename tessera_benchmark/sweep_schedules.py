@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -18,8 +19,75 @@ import tritonblas
 import pandas as pd
 import numpy as np
 import math
+import time
 
-MISCOPE_GPU_ID = "5"
+BENCHMARK_TIMEOUT_SECONDS = 10
+PROCESS_GROUP_GRACE_SECONDS = 2
+
+
+class BenchmarkTimeoutError(RuntimeError):
+    def __init__(self, cmd, timeout, stdout=None, stderr=None):
+        cmd_str = " ".join(shlex.quote(str(part)) for part in cmd)
+        super().__init__(f"Timed out after {timeout}s: {cmd_str}")
+        self.cmd = cmd
+        self.timeout = timeout
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def terminate_process_group(proc):
+    """Send SIGTERM/SIGKILL to an entire process group."""
+    if proc.poll() is not None:
+        return
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    deadline = time.time() + PROCESS_GROUP_GRACE_SECONDS
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.1)
+
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def run_subprocess_with_timeout(
+    cmd,
+    cwd,
+    timeout=BENCHMARK_TIMEOUT_SECONDS,
+    capture_output=True,
+    text=True,
+    env=None,
+):
+    """Run a subprocess with timeout and ensure child processes are terminated."""
+    stdout_pipe = subprocess.PIPE if capture_output else None
+    stderr_pipe = subprocess.PIPE if capture_output else None
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=stdout_pipe,
+        stderr=stderr_pipe,
+        text=text,
+        env=env,
+        start_new_session=True,
+    )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(proc)
+        stdout, stderr = proc.communicate()
+        raise BenchmarkTimeoutError(cmd, timeout, stdout=stdout, stderr=stderr)
+
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+MISCOPE_GPU_ID = "3"
 MISCOPE_COLUMNS = [
     "curr_gfxclk",
     "curr_socclk",
@@ -31,6 +99,22 @@ MISCOPE_COLUMNS = [
 MISCOPE_MEAN_KEYS = [f"{col}_mean" for col in MISCOPE_COLUMNS]
 MISCOPE_OUTPUT_DIR = "miscope_metrics"
 
+STRATEGY_LABELS = {
+    "no_chunking_row_major_1": "No chunking / Row Major 1",
+    "no_chunking_row_major_0": "No chunking / Row Major 0",
+    "chiplet_chunk_row_major_1": "Chiplet chunk / Row Major 1",
+    "chiplet_chunk_row_major_0": "Chiplet chunk / Row Major 0",
+}
+
+STRATEGY_LABEL_ORDER = [
+    "no_chunking_row_major_1",
+    "no_chunking_row_major_0",
+    "chiplet_chunk_row_major_1",
+    "chiplet_chunk_row_major_0",
+]
+
+REFERENCE_BASELINE_KEY = "no_chunking_row_major_1"
+
 
 def compute_sweep_summary(metadata, sweep_results):
     """Build summary information for sweep results."""
@@ -38,8 +122,10 @@ def compute_sweep_summary(metadata, sweep_results):
         "best_schedule": None,
         "best_schedule_index": None,
         "best_tflops": None,
-        "speedup_vs_predicted": None,
-        "speedup_vs_optimal": None,
+        "best_schedules_by_strategy": {},
+        "speedup_vs_predicted_no_chunking_rm1": None,
+        "speedup_vs_best_no_chunking_rm1": None,
+        "reference_baseline_key": REFERENCE_BASELINE_KEY,
         "num_sweep_results": len(sweep_results or [])
     }
 
@@ -50,27 +136,59 @@ def compute_sweep_summary(metadata, sweep_results):
         value = entry.get("tflops")
         return value if value is not None else float("-inf")
 
-    best_idx, best_entry = max(
-        ((idx, entry) for idx, entry in enumerate(sweep_results, start=1)),
-        key=lambda item: tflops_key(item[1])
-    )
+    best_idx = None
+    best_entry = None
+    best_entry_tflops = float("-inf")
 
-    baseline_data = (metadata or {}).get("baseline_data", {})
-    predicted_tflops = baseline_data.get("predicted_tflops")
-    optimal_tflops = baseline_data.get("optimal_tflops")
-    best_tflops = best_entry.get("tflops")
+    strategy_bests = {}
+
+    for idx, entry in enumerate(sweep_results, start=1):
+        entry_tflops = tflops_key(entry)
+
+        if best_entry is None or entry_tflops > best_entry_tflops:
+            best_entry = entry
+            best_entry_tflops = entry_tflops
+            best_idx = idx
+
+        chunking_strategy = entry.get("chunking_strategy")
+        row_major = entry.get("row_major")
+        if chunking_strategy is not None and row_major is not None:
+            strategy_key = f"{chunking_strategy}_row_major_{row_major}"
+            current_best = strategy_bests.get(strategy_key)
+            if current_best is None or entry_tflops > tflops_key(current_best["schedule"]):
+                strategy_bests[strategy_key] = {
+                    "schedule": copy.deepcopy(entry),
+                    "schedule_index": idx
+                }
+
+    # Ensure all known strategy keys are present (even if None)
+    for strategy_key in STRATEGY_LABELS.keys():
+        strategy_bests.setdefault(strategy_key, None)
+
+    baseline_data = (metadata or {}).get("baseline_data", {}) or {}
+    best_tflops = best_entry.get("tflops") if best_entry else None
 
     summary.update({
         "best_schedule_index": best_idx,
         "best_tflops": best_tflops,
-        "best_schedule": copy.deepcopy(best_entry)
+        "best_schedule": copy.deepcopy(best_entry) if best_entry else None,
+        "best_schedules_by_strategy": strategy_bests
     })
 
-    if best_tflops is not None and predicted_tflops and predicted_tflops > 0:
-        summary["speedup_vs_predicted"] = best_tflops / predicted_tflops
+    reference_key = summary["reference_baseline_key"]
+    reference_data = None
+    if isinstance(baseline_data, dict):
+        reference_data = baseline_data.get(reference_key)
 
-    if best_tflops is not None and optimal_tflops and optimal_tflops > 0:
-        summary["speedup_vs_optimal"] = best_tflops / optimal_tflops
+    if reference_data:
+        predicted_tflops = reference_data.get("predicted_tflops")
+        optimal_tflops = reference_data.get("optimal_tflops")
+
+        if best_tflops is not None and predicted_tflops and predicted_tflops > 0:
+            summary["speedup_vs_predicted_no_chunking_rm1"] = best_tflops / predicted_tflops
+
+        if best_tflops is not None and optimal_tflops and optimal_tflops > 0:
+            summary["speedup_vs_best_no_chunking_rm1"] = best_tflops / optimal_tflops
 
     return summary
 
@@ -219,7 +337,13 @@ def calculate_tcc_hit_rate(csv_file, kernel_name='persistent_matmul_tessera'):
         return None
 
 
-def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gpu_ids="0"):
+def run_benchmark_with_miscope(
+    bench_cmd,
+    base_dir,
+    metrics_prefix="metrics",
+    gpu_ids="0",
+    timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
+):
     """Run the benchmark through miscope and return process result.
 
     Note: We purposefully avoid parsing/aggregating any MiScope output here.
@@ -255,7 +379,14 @@ def run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix="metrics", gp
     ]
 
     print(f"Running with miscope: {' '.join(shlex.quote(str(arg)) for arg in miscope_cmd)}")
-    result = subprocess.run(miscope_cmd, capture_output=True, text=True, cwd=base_dir)
+
+    result = run_subprocess_with_timeout(
+        miscope_cmd,
+        cwd=base_dir,
+        timeout=timeout_seconds,
+        capture_output=True,
+        text=True,
+    )
 
     if result.returncode != 0:
         print(f"miscope benchmark failed: {result.stderr}")
@@ -300,7 +431,19 @@ def run_tessera_benchmark(
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
-        miscope_result, _ = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
+        try:
+            miscope_result, _ = run_benchmark_with_miscope(
+                bench_cmd,
+                base_dir,
+                metrics_prefix=metrics_prefix,
+                gpu_ids=MISCOPE_GPU_ID,
+                timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
+            )
+        except BenchmarkTimeoutError as exc:
+            print(
+                f"[Timeout] MiScope benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+            )
+            return None
         if miscope_result is None:
             return None
 
@@ -325,7 +468,19 @@ def run_tessera_benchmark(
         ]
         
         print(f"Running: {' '.join(rocprof_cmd)}")
-        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=base_dir)
+        try:
+            rocprof_result = run_subprocess_with_timeout(
+                rocprof_cmd,
+                cwd=base_dir,
+                timeout=BENCHMARK_TIMEOUT_SECONDS,
+                capture_output=True,
+                text=True,
+            )
+        except BenchmarkTimeoutError as exc:
+            print(
+                f"[Timeout] rocprof benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+            )
+            return None
         
         if rocprof_result.returncode != 0:
             print(f"Benchmark failed: {rocprof_result.stderr}")
@@ -373,6 +528,8 @@ def run_baseline_benchmark(
     bench_rep_ms=10,
     prof_warmup_ms=20,
     prof_rep_ms=20,
+    chunk_size=-1,
+    row_major=1,
 ):
     """Run a single benchmark with rocprof profiling and return results."""
     try:
@@ -390,12 +547,26 @@ def run_baseline_benchmark(
             "--dtype", dtype,
             "--warmup", str(bench_warmup_ms),
             "--rep", str(bench_rep_ms),
-            "--baseline"            
+            "--baseline",
+            "--chunk-size", str(chunk_size),
+            "--row-major", str(row_major)
         ]
 
         # Benchmark first without rocprof, wrapped with miscope for metrics capture
         metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
-        miscope_result, _ = run_benchmark_with_miscope(bench_cmd, base_dir, metrics_prefix=metrics_prefix, gpu_ids=MISCOPE_GPU_ID)
+        try:
+            miscope_result, _ = run_benchmark_with_miscope(
+                bench_cmd,
+                base_dir,
+                metrics_prefix=metrics_prefix,
+                gpu_ids=MISCOPE_GPU_ID,
+                timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
+            )
+        except BenchmarkTimeoutError as exc:
+            print(
+                f"[Timeout] MiScope baseline benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+            )
+            return None
         if miscope_result is None:
             return None
 
@@ -418,12 +589,26 @@ def run_baseline_benchmark(
             "--dtype", dtype,
             "--warmup", str(prof_warmup_ms),
             "--rep", str(prof_rep_ms),
-            "--baseline"
+            "--baseline",
+            "--chunk-size", str(chunk_size),
+            "--row-major", str(row_major)
         ]
         
         print("Running with rocprof...") 
         print(f"Running: {' '.join(rocprof_cmd)}")
-        rocprof_result = subprocess.run(rocprof_cmd, capture_output=True, text=True, cwd=base_dir)
+        try:
+            rocprof_result = run_subprocess_with_timeout(
+                rocprof_cmd,
+                cwd=base_dir,
+                timeout=BENCHMARK_TIMEOUT_SECONDS,
+                capture_output=True,
+                text=True,
+            )
+        except BenchmarkTimeoutError as exc:
+            print(
+                f"[Timeout] rocprof baseline benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+            )
+            return None
         
         if rocprof_result.returncode != 0:
             print(f"Benchmark failed: {rocprof_result.stderr}")
@@ -446,7 +631,9 @@ def run_baseline_benchmark(
                 "ms": benchmark_data.get('ms', 0),
                 "transA": benchmark_data["transA"],
                 "transB": benchmark_data["transB"],
-                "init_type": benchmark_data["init_type"]
+                "init_type": benchmark_data["init_type"],
+                "chunk_size": chunk_size,
+                "row_major": row_major
             }
             # Intentionally exclude aggregated MiScope metrics from saved results
 
@@ -458,7 +645,7 @@ def run_baseline_benchmark(
         print(f"Error running benchmark: {e}")
         return None
 
-def save_progressive_results(results, csv_data, json_path, csv_path):
+def save_progressive_results(results, csv_data, json_path, csv_path, baseline_sweep=False):
     """Save results progressively to avoid data loss."""
     metadata = results.get("metadata", {})
     sweep_results = results.get("sweep_results", [])
@@ -471,12 +658,13 @@ def save_progressive_results(results, csv_data, json_path, csv_path):
     # Save CSV
     if csv_data:
         with open(csv_path, 'w', newline='') as f:
-            fieldnames = [
-                "ordering_0", "ordering_1", "WGM", "WGN",
-                "tflops", "ms", "number_of_errors",
-            ]
-            # Do not include aggregated MiScope metrics in CSV output
-            fieldnames.append("l2_hit_rate_pct")
+            if baseline_sweep:
+                fieldnames = ["category", "WGM", "tflops", "ms", "chunk_size", "chunking_strategy", "row_major", "l2_hit_rate_pct"]
+            else:
+                fieldnames = [
+                    "category", "ordering_0", "ordering_1", "WGM", "WGN",
+                    "tflops", "ms", "number_of_errors", "l2_hit_rate_pct"
+                ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(csv_data)
@@ -490,13 +678,19 @@ def sweep_matrix_problem(
     max_wgm=16,
     max_wgn=16,
     results_dir="results",
+    input_csv=None,
     bench_warmup_ms=10,
     bench_rep_ms=10,
     prof_warmup_ms=20,
     prof_rep_ms=20,
+    baseline_sweep=False,
+    problem_category=None,
 ):
     """Sweep all configurations for a single matrix problem with progressive saving."""
     print(f"\nSweeping matrix problem: M={m}, N={n}, K={k}")
+    if problem_category:
+        print(f"  Category: {problem_category}")
+    category_value = problem_category if problem_category is not None else ""
     
     # Get block dimensions from selector
     selector = tritonblas.MatmulHeuristicResult(m, n, k, 
@@ -508,106 +702,220 @@ def sweep_matrix_problem(
     # Get all workgroup combinations (constrained by grid dimensions)
     num_pid_m = math.ceil(m / BLK_M)
     num_pid_n = math.ceil(n / BLK_N)
-    wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
-    # wgm_wgn_combinations = [(4, 4), (4, 8), (8, 4), (6, 6)]
-    print(f"Num wgm/wgn combinations to test: {len(wgm_wgn_combinations)}")
     
-    # All ordering combinations
-    orderings = [0, 1, 2, 3]  # ROW_MAJOR, COLUMN_MAJOR, SNAKE, SPIRAL
-    print(f"Testing orderings: {[get_ordering_name(ord) for ord in orderings]}")
-    ordering_combinations = [(o0, o1) for o0 in orderings for o1 in orderings]
+    if baseline_sweep:
+        # For baseline sweep, only test WGM values (WGN is always 1 for baseline)
+        wgm_values = list(range(1, min(max_wgm, num_pid_m) + 1))
+        wgm_wgn_combinations = [(wgm, 1) for wgm in wgm_values]
+        ordering_combinations = [(0, 0)]  # Only ROW_MAJOR, ROW_MAJOR for baseline
+        print(f"Baseline sweep: testing {len(wgm_values)} WGM values with two chunking strategies")
+    else:
+        wgm_wgn_combinations = get_all_wgm_wgn_combinations(max_wgm, max_wgn, num_pid_m, num_pid_n)
+        # All ordering combinations
+        orderings = [0, 1, 2, 3]  # ROW_MAJOR, COLUMN_MAJOR, SNAKE, SPIRAL
+        ordering_combinations = [(o0, o1) for o0 in orderings for o1 in orderings]
+        print(f"Testing orderings: {[get_ordering_name(ord) for ord in orderings]}")
     
-    total_combinations = len(wgm_wgn_combinations) * len(ordering_combinations)
+    if baseline_sweep:
+        # For baseline sweep, we test each WGM with 4 combinations (2 chunking strategies × 2 row_major values)
+        total_combinations = len(wgm_wgn_combinations) * len(ordering_combinations) * 4
+    else:
+        total_combinations = len(wgm_wgn_combinations) * len(ordering_combinations)
+    
     print(f"  Block sizes: BLK_M={BLK_M}, BLK_N={BLK_N}, BLK_K={BLK_K}")
     print(f"  Grid: {num_pid_m} x {num_pid_n}")
     print(f"  WGM/WGN combinations: {len(wgm_wgn_combinations)}")
-    print(f"  Ordering combinations: {len(ordering_combinations)}")
+    if not baseline_sweep:
+        print(f"  Ordering combinations: {len(ordering_combinations)}")
+    else:
+        print(f"  Combinations: 4 (2 chunking strategies × 2 row_major values)")
     print(f"  Total combinations: {total_combinations}")
     
     # Generate filenames
-    json_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.json"
-    csv_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.csv"
+    if baseline_sweep:
+        json_filename = f"baseline_sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.json"
+        csv_filename = f"baseline_sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.csv"
+    else:
+        json_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.json"
+        csv_filename = f"sweep_results_m{m}_n{n}_k{k}_mt{BLK_M}_nt{BLK_N}_kt{BLK_K}_{arch}.csv"
     json_path = os.path.join(results_dir, json_filename)
     csv_path = os.path.join(results_dir, csv_filename)
 
 
     # Get optimal baseline:
     baseline_results = []
-    # baseline_wgm_values = [1, 2, 4, 6, 8, 16]
-    baseline_wgm_values = [1, 2, 4, 6, 8, 16]
+    # Use max_wgm for baseline computation, but ensure we don't exceed grid constraints
+    baseline_wgm_values = [x for x in range(1, min(max_wgm, num_pid_m) + 1)]
     print(f"Computing baseline perf for WGMs: {baseline_wgm_values}...")
-    for wgm in baseline_wgm_values:
-        baseline_result = run_baseline_benchmark(
-            m,
-            n,
-            k,
-            wgm,
-            arch,
-            dtype=dtype,
-            bench_warmup_ms=bench_warmup_ms,
-            bench_rep_ms=bench_rep_ms,
-            prof_warmup_ms=prof_warmup_ms,
-            prof_rep_ms=prof_rep_ms,
-        )
-        if baseline_result is not None:
-            baseline_results.append(baseline_result)
-        else: 
-            sys.exit(1)
-
-    optimal_l2_hit_rate = -1
-    optimal_tflops = -1
-    optimal_ms = -1
-    optimal_wgm = -1
-    # Initialize predicted values
-    predicted_tflops = None
-    predicted_l2_hit_rate = None
-    predicted_ms = None
+    
+    if baseline_sweep:
+        # For baseline sweep, test all 4 combinations of chunking strategy + row_major
+        combinations = [
+            (-1, "no_chunking", 1),
+            (-1, "no_chunking", 0),
+            (None, "chiplet_chunk", 1),  # None means calculate as wgm*wgm
+            (None, "chiplet_chunk", 0)
+        ]
+        for chunk_size, strategy_name, row_major in combinations:
+            print(f"Testing baseline with {strategy_name} chunking strategy, row_major={row_major}...")
+            for wgm in baseline_wgm_values:
+                actual_chunk_size = chunk_size if chunk_size != None else wgm * wgm
+                baseline_result = run_baseline_benchmark(
+                    m, n, k, wgm, arch, dtype=dtype,
+                    bench_warmup_ms=bench_warmup_ms, bench_rep_ms=bench_rep_ms,
+                    prof_warmup_ms=prof_warmup_ms, prof_rep_ms=prof_rep_ms,
+                    chunk_size=actual_chunk_size, row_major=row_major
+                )
+                if baseline_result is not None:
+                    baseline_results.append(baseline_result)
+                else: 
+                    sys.exit(1)
+    else:
+        # For regular sweep, use normal chunking
+        for wgm in baseline_wgm_values:
+            baseline_result = run_baseline_benchmark(
+                m, n, k, wgm, arch, dtype=dtype,
+                bench_warmup_ms=bench_warmup_ms, bench_rep_ms=bench_rep_ms,
+                prof_warmup_ms=prof_warmup_ms, prof_rep_ms=prof_rep_ms,
+                chunk_size=-1
+            )
+            if baseline_result is not None:
+                baseline_results.append(baseline_result)
+            else: 
+                sys.exit(1)
 
     baseline_runs = []
+    baseline_data = {}
 
-    for res in baseline_results:
-        profiler_data = res["profiler_data"]
-        benchmark_data = res["benchmark_data"]
-
-        baseline_entry = {
-            "wgm": benchmark_data.get("wgm"),
-            "tflops": benchmark_data.get("tflops"),
-            "ms": benchmark_data.get("ms"),
-            "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
-            "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None
-        }
-        baseline_runs.append(baseline_entry)
-
-        if benchmark_data["wgm"] == gsize_m:
-            predicted_tflops = benchmark_data["tflops"]
-            predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
-            predicted_ms = benchmark_data["ms"]
+    if baseline_sweep:
+        # For baseline sweep, process each combination of chunking strategy + row_major separately
+        combinations = [
+            (-1, "no_chunking", 1),
+            (-1, "no_chunking", 0),
+            (None, "chiplet_chunk", 1),
+            (None, "chiplet_chunk", 0)
+        ]
         
-        if benchmark_data["tflops"] > optimal_tflops:
-            optimal_wgm = benchmark_data["wgm"]
-            optimal_tflops = benchmark_data["tflops"]
-            optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
-            optimal_ms = benchmark_data["ms"]
+        for chunk_size, strategy_name, row_major in combinations:
+            strategy_results = []
+            optimal_l2_hit_rate = -1
+            optimal_tflops = -1
+            optimal_ms = -1
+            optimal_wgm = -1
+            predicted_tflops = None
+            predicted_l2_hit_rate = None
+            predicted_ms = None
+            
+            # Filter results for this combination
+            for res in baseline_results:
+                benchmark_data = res["benchmark_data"]
+                actual_chunk_size = chunk_size if chunk_size != None else benchmark_data["wgm"] * benchmark_data["wgm"]
+                
+                if (benchmark_data.get("chunk_size") == actual_chunk_size and 
+                    benchmark_data.get("row_major") == row_major):
+                    profiler_data = res["profiler_data"]
+                    
+                    baseline_entry = {
+                        "wgm": benchmark_data.get("wgm"),
+                        "tflops": benchmark_data.get("tflops"),
+                        "ms": benchmark_data.get("ms"),
+                        "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
+                        "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None,
+                        "chunk_size": actual_chunk_size,
+                        "chunking_strategy": strategy_name,
+                        "row_major": row_major
+                    }
+                    strategy_results.append(baseline_entry)
+                    
+                    if benchmark_data["wgm"] == gsize_m:
+                        predicted_tflops = benchmark_data["tflops"]
+                        predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
+                        predicted_ms = benchmark_data["ms"]
+                    
+                    if benchmark_data["tflops"] > optimal_tflops:
+                        optimal_wgm = benchmark_data["wgm"]
+                        optimal_tflops = benchmark_data["tflops"]
+                        optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
+                        optimal_ms = benchmark_data["ms"]
+            
+            # Check if predicted values were found for this combination
+            if predicted_tflops is None:
+                raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m} with {strategy_name} chunking, row_major={row_major}. Available WGMs: {[res['wgm'] for res in strategy_results]}")
+            if optimal_tflops == -1:
+                raise RuntimeError(f"No valid baseline results found for {strategy_name} chunking, row_major={row_major} - all baseline runs failed")
+            
+            # Calculate chunk sizes for predicted and optimal values
+            predicted_chunk_size = chunk_size if chunk_size != None else gsize_m * gsize_m
+            optimal_chunk_size = chunk_size if chunk_size != None else optimal_wgm * optimal_wgm
+            
+            combination_key = f"{strategy_name}_row_major_{row_major}"
+            baseline_data[combination_key] = {
+                "predicted_wgm": gsize_m, 
+                "predicted_chunk_size": predicted_chunk_size,
+                "predicted_row_major": row_major,
+                "predicted_tflops": predicted_tflops,
+                "predicted_l2_hit_rate": predicted_l2_hit_rate, 
+                "predicted_ms": predicted_ms, 
+                "optimal_wgm": optimal_wgm,
+                "optimal_chunk_size": optimal_chunk_size,
+                "optimal_row_major": row_major,
+                "optimal_tflops": optimal_tflops,
+                "optimal_ms": optimal_ms,
+                "optimal_l2_hit_rate": optimal_l2_hit_rate,
+                "baseline_runs": strategy_results,
+            }
+            baseline_runs.extend(strategy_results)
+    else:
+        # For regular sweep, use normal processing
+        optimal_l2_hit_rate = -1
+        optimal_tflops = -1
+        optimal_ms = -1
+        optimal_wgm = -1
+        predicted_tflops = None
+        predicted_l2_hit_rate = None
+        predicted_ms = None
 
-    # Check if predicted values were found
-    if predicted_tflops is None:
-        raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m}. Available WGMs: {[res['benchmark_data']['wgm'] for res in baseline_results]}")
-    if optimal_tflops == -1:
-        raise RuntimeError("No valid baseline results found - all baseline runs failed")
+        for res in baseline_results:
+            profiler_data = res["profiler_data"]
+            benchmark_data = res["benchmark_data"]
 
-    # Do not track aggregated MiScope metrics
+            baseline_entry = {
+                "wgm": benchmark_data.get("wgm"),
+                "tflops": benchmark_data.get("tflops"),
+                "ms": benchmark_data.get("ms"),
+                "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
+                "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None
+            }
+            baseline_runs.append(baseline_entry)
 
-    baseline_data = {
-        "predicted_wgm": gsize_m, 
-        "predicted_tflops": predicted_tflops,
-        "predicted_l2_hit_rate": predicted_l2_hit_rate, 
-        "predicted_ms": predicted_ms, 
-        "optimal_wgm": optimal_wgm,
-        "optimal_tflops": optimal_tflops,
-        "optimal_ms": optimal_ms,
-        "optimal_l2_hit_rate": optimal_l2_hit_rate,
-        "baseline_runs": baseline_runs,
-    }
+            if benchmark_data["wgm"] == gsize_m:
+                predicted_tflops = benchmark_data["tflops"]
+                predicted_l2_hit_rate = profiler_data["l2_hit_rate"]
+                predicted_ms = benchmark_data["ms"]
+            
+            if benchmark_data["tflops"] > optimal_tflops:
+                optimal_wgm = benchmark_data["wgm"]
+                optimal_tflops = benchmark_data["tflops"]
+                optimal_l2_hit_rate = profiler_data["l2_hit_rate"]
+                optimal_ms = benchmark_data["ms"]
+
+        # Check if predicted values were found
+        if predicted_tflops is None:
+            raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m}. Available WGMs: {[res['benchmark_data']['wgm'] for res in baseline_results]}")
+        if optimal_tflops == -1:
+            raise RuntimeError("No valid baseline results found - all baseline runs failed")
+
+        baseline_data = {
+            "predicted_wgm": gsize_m, 
+            "predicted_tflops": predicted_tflops,
+            "predicted_l2_hit_rate": predicted_l2_hit_rate, 
+            "predicted_ms": predicted_ms, 
+            "optimal_wgm": optimal_wgm,
+            "optimal_tflops": optimal_tflops,
+            "optimal_ms": optimal_ms,
+            "optimal_l2_hit_rate": optimal_l2_hit_rate,
+            "baseline_runs": baseline_runs,
+        }
 
     # Exclude aggregated MiScope metrics from baseline data
 
@@ -627,14 +935,29 @@ def sweep_matrix_problem(
             "BLK_K": BLK_K
         },
         "grid": {
-            "num_pid_m": m // BLK_M,
-            "num_pid_n": n // BLK_N
+            "num_pid_m": math.ceil(m / BLK_M),
+            "num_pid_n": math.ceil(n / BLK_N),
+            "k_tiles": math.ceil(k / 64)
         },
         "arch": arch,
         "total_combinations": total_combinations,
-        "orderings_tested": [get_ordering_name(o) for o in orderings],
         "baseline_data": baseline_data
     }
+
+    if problem_category is not None:
+        metadata["category"] = problem_category
+
+    if input_csv:
+        metadata["input_csv"] = os.path.abspath(input_csv)
+    
+    # Add orderings info only for non-baseline sweeps
+    if not baseline_sweep:
+        metadata["orderings_tested"] = [get_ordering_name(o) for o in orderings]
+    else:
+        metadata["baseline_sweep"] = True
+        metadata["wgm_values_tested"] = wgm_values
+
+    print(json.dumps(metadata, indent=4))
 
             
     
@@ -644,68 +967,124 @@ def sweep_matrix_problem(
     
     # Run all combinations with progressive saving
     combination_count = 0
-    save_interval = max(1, total_combinations // 20)  # Save every 5% of progress
+    save_interval = 1  # Save after every combination to persist progress more frequently
     
     for wgm, wgn in wgm_wgn_combinations:
         for ordering0, ordering1 in ordering_combinations:
-            combination_count += 1
-            print(f"  [{combination_count}/{total_combinations}] Ordering=({ordering0},{ordering1}), WGM={wgm}, WGN={wgn}")
+            if baseline_sweep:
+                # For baseline sweep, test all 4 combinations of chunking strategy + row_major
+                combinations = [
+                    (-1, "no_chunking", 1),
+                    (-1, "no_chunking", 0),
+                    (wgm * wgm, "chiplet_chunk", 1),
+                    (wgm * wgm, "chiplet_chunk", 0)
+                ]
+                for chunk_size, strategy_name, row_major in combinations:
+                    combination_count += 1
+                    print(f"  [{combination_count}/{total_combinations}] WGM={wgm} (baseline, {strategy_name}, chunk_size={chunk_size}, row_major={row_major})")
+                    
+                    result = run_baseline_benchmark(
+                        m, n, k, wgm, arch, dtype,
+                        bench_warmup_ms, bench_rep_ms,
+                        prof_warmup_ms, prof_rep_ms,
+                        chunk_size=chunk_size, row_major=row_major
+                    )
+                    
+                    if result is not None:
+                        # Extract benchmark and profiler data
+                        benchmark_data = result["benchmark_data"]
+                        profiler_data = result["profiler_data"]
+                        
+                        # Add to sweep results
+                        sweep_result = {
+                            "WGM": wgm,
+                            "tflops": benchmark_data.get("tflops", 0),
+                            "ms": benchmark_data.get("ms", 0),
+                            "transA": benchmark_data["transA"],
+                            "transB": benchmark_data["transB"],
+                            "init_type": benchmark_data["init_type"],
+                            "chunk_size": chunk_size,
+                            "chunking_strategy": strategy_name,
+                            "row_major": row_major,
+                            "profiler_data": profiler_data
+                        }
+                        sweep_results.append(sweep_result)
+                        
+                        # Add to CSV data
+                        csv_row = {
+                            "category": category_value,
+                            "WGM": wgm,
+                            "tflops": benchmark_data.get("tflops", 0),
+                            "ms": benchmark_data.get("ms", 0),
+                            "chunk_size": chunk_size,
+                            "chunking_strategy": strategy_name,
+                            "row_major": row_major,
+                            "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
+                        }
+                        csv_data.append(csv_row)
 
-            
-            # Run benchmark
-            result = run_tessera_benchmark(
-                m,
-                n,
-                k,
-                ordering0,
-                ordering1,
-                wgm,
-                wgn,
-                arch,
-                dtype,
-                bench_warmup_ms,
-                bench_rep_ms,
-                prof_warmup_ms,
-                prof_rep_ms,
-            )
-            
-            if result is not None:
-                # Extract benchmark and profiler data
-                benchmark_data = result["benchmark_data"]
-                profiler_data = result["profiler_data"]
-                
-                # Add to sweep results
-                sweep_result = {
-                    "ordering_0": get_ordering_name(ordering0),
-                    "ordering_1": get_ordering_name(ordering1),
-                    "WGM": wgm,
-                    "WGN": wgn,
-                    "tflops": benchmark_data.get("tflops", 0),
-                    "ms": benchmark_data.get("ms", 0),
-                    "number_of_errors": benchmark_data.get("number_of_errors", 0),
-                    "transA": benchmark_data["transA"],
-                    "transB": benchmark_data["transB"],
-                    "init_type": benchmark_data["init_type"],
-                    "profiler_data": profiler_data
-                }
-                sweep_results.append(sweep_result)
-                
-                # Add to CSV data
-                csv_row = {
-                    "ordering_0": get_ordering_name(ordering0),
-                    "ordering_1": get_ordering_name(ordering1),
-                    "WGM": wgm,
-                    "WGN": wgn,
-                    "tflops": benchmark_data.get("tflops", 0),
-                    "ms": benchmark_data.get("ms", 0),
-                    "number_of_errors": benchmark_data.get("number_of_errors", 0),
-                    "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
-                }
-                csv_data.append(csv_row)
-
-                print(json.dumps(result, indent=4))
+                        print(json.dumps(result, indent=4))
+                    else:
+                        print(f"    Failed to get results")
             else:
-                print(f"    Failed to get results")
+                combination_count += 1
+                print(f"  [{combination_count}/{total_combinations}] Ordering=({ordering0},{ordering1}), WGM={wgm}, WGN={wgn}")
+
+                # Run benchmark
+                result = run_tessera_benchmark(
+                    m,
+                    n,
+                    k,
+                    ordering0,
+                    ordering1,
+                    wgm,
+                    wgn,
+                    arch,
+                    dtype,
+                    bench_warmup_ms,
+                    bench_rep_ms,
+                    prof_warmup_ms,
+                    prof_rep_ms,
+                )
+            
+                if result is not None:
+                    # Extract benchmark and profiler data
+                    benchmark_data = result["benchmark_data"]
+                    profiler_data = result["profiler_data"]
+                    
+                    # Add to sweep results
+                    sweep_result = {
+                        "ordering_0": get_ordering_name(ordering0),
+                        "ordering_1": get_ordering_name(ordering1),
+                        "WGM": wgm,
+                        "WGN": wgn,
+                        "tflops": benchmark_data.get("tflops", 0),
+                        "ms": benchmark_data.get("ms", 0),
+                        "number_of_errors": benchmark_data.get("number_of_errors", 0),
+                        "transA": benchmark_data["transA"],
+                        "transB": benchmark_data["transB"],
+                        "init_type": benchmark_data["init_type"],
+                        "profiler_data": profiler_data
+                    }
+                    sweep_results.append(sweep_result)
+                    
+                    # Add to CSV data
+                    csv_row = {
+                        "category": category_value,
+                        "ordering_0": get_ordering_name(ordering0),
+                        "ordering_1": get_ordering_name(ordering1),
+                        "WGM": wgm,
+                        "WGN": wgn,
+                        "tflops": benchmark_data.get("tflops", 0),
+                        "ms": benchmark_data.get("ms", 0),
+                        "number_of_errors": benchmark_data.get("number_of_errors", 0),
+                        "l2_hit_rate_pct": profiler_data.get("hit_rate_pct", 0) if profiler_data else 0
+                    }
+                    csv_data.append(csv_row)
+
+                    print(json.dumps(result, indent=4))
+                else:
+                    print(f"    Failed to get results")
             
             # Progressive save
             if combination_count % save_interval == 0 or combination_count == total_combinations:
@@ -713,7 +1092,7 @@ def sweep_matrix_problem(
                     "metadata": metadata,
                     "sweep_results": sweep_results
                 }
-                save_progressive_results(results, csv_data, json_path, csv_path)
+                save_progressive_results(results, csv_data, json_path, csv_path, baseline_sweep)
                 print(f"    Progress saved: {combination_count}/{total_combinations} ({100*combination_count/total_combinations:.1f}%)")
     
     # Final save
@@ -721,7 +1100,82 @@ def sweep_matrix_problem(
         "metadata": metadata,
         "sweep_results": sweep_results
     }
-    save_progressive_results(results, csv_data, json_path, csv_path)
+    save_progressive_results(results, csv_data, json_path, csv_path, baseline_sweep)
+
+    summary = results.get("summary", {})
+    if summary:
+        def format_float(value):
+            return f"{value:.3f}" if isinstance(value, (int, float)) else "N/A"
+
+        print("\nSummary of best schedules:")
+        best_schedules = summary.get("best_schedules_by_strategy") or {}
+        any_strategy_printed = False
+        for strategy_key in STRATEGY_LABEL_ORDER:
+            label = STRATEGY_LABELS.get(strategy_key, strategy_key)
+            strategy_info = best_schedules.get(strategy_key)
+            if strategy_info and strategy_info.get("schedule"):
+                schedule = strategy_info["schedule"]
+                tflops = schedule.get("tflops")
+                ms = schedule.get("ms")
+                wgm = schedule.get("WGM") or schedule.get("wgm")
+                wgn = schedule.get("WGN") or schedule.get("wgn")
+                chunking_strategy = schedule.get("chunking_strategy")
+                row_major = schedule.get("row_major")
+
+                details = []
+                if wgm is not None:
+                    details.append(f"WGM={wgm}")
+                if wgn is not None:
+                    details.append(f"WGN={wgn}")
+                if chunking_strategy is not None:
+                    details.append(f"chunking={chunking_strategy}")
+                if row_major is not None:
+                    details.append(f"row_major={row_major}")
+
+                detail_str = ", ".join(details)
+                print(f"  {label}: TFLOPS={format_float(tflops)}, Time={format_float(ms)} ms ({detail_str})")
+                any_strategy_printed = True
+            else:
+                print(f"  {label}: no valid schedule")
+                any_strategy_printed = True
+
+        if not any_strategy_printed:
+            print("  No strategy-specific schedules recorded.")
+
+        best_schedule = summary.get("best_schedule")
+        if best_schedule:
+            best_tflops = best_schedule.get("tflops")
+            best_ms = best_schedule.get("ms")
+            wgm = best_schedule.get("WGM") or best_schedule.get("wgm")
+            wgn = best_schedule.get("WGN") or best_schedule.get("wgn")
+            chunking_strategy = best_schedule.get("chunking_strategy")
+            row_major = best_schedule.get("row_major")
+
+            details = []
+            if wgm is not None:
+                details.append(f"WGM={wgm}")
+            if wgn is not None:
+                details.append(f"WGN={wgn}")
+            if chunking_strategy is not None:
+                details.append(f"chunking={chunking_strategy}")
+            if row_major is not None:
+                details.append(f"row_major={row_major}")
+
+            detail_str = ", ".join(details)
+            print(f"\n  Overall best schedule: TFLOPS={format_float(best_tflops)}, Time={format_float(best_ms)} ms ({detail_str})")
+        else:
+            print("\n  Overall best schedule: none")
+
+        speedup_pred = summary.get("speedup_vs_predicted_no_chunking_rm1")
+        speedup_best = summary.get("speedup_vs_best_no_chunking_rm1")
+        reference_label = STRATEGY_LABELS.get(summary.get("reference_baseline_key", REFERENCE_BASELINE_KEY), summary.get("reference_baseline_key", REFERENCE_BASELINE_KEY))
+
+        if speedup_pred:
+            print(f"  Speedup vs predicted ({reference_label}): {format_float(speedup_pred)}x")
+        if speedup_best:
+            print(f"  Speedup vs best ({reference_label}): {format_float(speedup_best)}x")
+        if not speedup_pred and not speedup_best:
+            print(f"  Speedup metrics unavailable for reference ({reference_label}).")
     
     return results, csv_data
 
@@ -862,7 +1316,11 @@ def run_single_configuration(
     metadata = {
         "matrix_dimensions": {"m": m, "n": n, "k": k},
         "block_dimensions": {"BLK_M": BLK_M, "BLK_N": BLK_N, "BLK_K": BLK_K},
-        "grid": {"num_pid_m": math.ceil(m / BLK_M), "num_pid_n": math.ceil(n / BLK_N)},
+        "grid": {
+            "num_pid_m": math.ceil(m / BLK_M),
+            "num_pid_n": math.ceil(n / BLK_N),
+            "k_tiles": math.ceil(k / 64)
+        },
         "arch": arch,
         "dtype": dtype,
         "single_config": True,
@@ -921,6 +1379,7 @@ def main():
     parser.add_argument("--bench-rep-ms", type=int, default=1000, help="Measurement duration (ms) for miscope (non-rocprof) benchmark runs")
     parser.add_argument("--prof-warmup-ms", type=int, default=50, help="Warmup duration (ms) for rocprof benchmark runs")
     parser.add_argument("--prof-rep-ms", type=int, default=100, help="Measurement duration (ms) for rocprof benchmark runs")
+    parser.add_argument("--chunk-size", type=int, default=-1, help="Chunk size for matmul operation (only used for non-baseline-sweep mode)")
     
     # Single configuration mode arguments
     parser.add_argument("--single-config", action="store_true", help="Run single configuration instead of sweep")
@@ -932,6 +1391,7 @@ def main():
     parser.add_argument("--ordering0", type=int, choices=[0,1,2,3], default=0, help="Ordering0 (default: 0)")
     parser.add_argument("--ordering1", type=int, choices=[0,1,2,3], default=0, help="Ordering1 (default: 0)")
     parser.add_argument("--baseline-only", action="store_true", help="Run only baseline (no tessera) for single config")
+    parser.add_argument("--baseline-sweep", action="store_true", help="Run baseline sweep (only WGM values, no tessera orderings) for sweep mode. Results saved with 'baseline' prefix.")
     
     args = parser.parse_args()
     
@@ -988,17 +1448,34 @@ def main():
         with open(args.csv_file, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # Filter out rows where batch_count is not 1
+                if 'batch_count' in row and int(row['batch_count']) != 1:
+                    continue
+                
                 m = int(row['m'])
                 n = int(row['n'])
                 k = int(row['k'])
-                matrix_problems.append((m, n, k))
+                category = row.get('category')
+                if category is not None:
+                    category = category.strip()
+                if category == "":
+                    category = None
+                matrix_problems.append({"m": m, "n": n, "k": k, "category": category})
         
         print(f"Found {len(matrix_problems)} matrix problems in {args.csv_file}")
+        if args.baseline_sweep:
+            print("Running in BASELINE SWEEP mode - only testing WGM values with baseline approach")
         
         # Process each matrix problem
-        for problem_idx, (m, n, k) in enumerate(matrix_problems):
+        for problem_idx, problem in enumerate(matrix_problems):
+            m = problem["m"]
+            n = problem["n"]
+            k = problem["k"]
+            category = problem.get("category")
             print(f"\n{'='*80}")
             print(f"Processing problem {problem_idx+1}/{len(matrix_problems)}: M={m}, N={n}, K={k}")
+            if category:
+                print(f"Category: {category}")
             print(f"{'='*80}")
             
             try:
@@ -1012,10 +1489,13 @@ def main():
                     args.max_wgm,
                     args.max_wgn,
                     args.results_dir,
+                    args.csv_file,
                     args.bench_warmup_ms,
                     args.bench_rep_ms,
                     args.prof_warmup_ms,
                     args.prof_rep_ms,
+                    args.baseline_sweep,
+                    problem_category=category,
                 )
                 
                 # Print summary
@@ -1026,7 +1506,10 @@ def main():
                 if sweep_results:
                     best_tflops = max(r["tflops"] for r in sweep_results)
                     best_config = next(r for r in sweep_results if r["tflops"] == best_tflops)
-                    print(f"Best TFLOPS: {best_tflops:.3f} (Ordering=({best_config['ordering_0']},{best_config['ordering_1']}), WGM={best_config['WGM']}, WGN={best_config['WGN']})")
+                    if args.baseline_sweep:
+                        print(f"Best TFLOPS: {best_tflops:.3f} (WGM={best_config['WGM']}, chunk_size={best_config['chunk_size']}, strategy={best_config['chunking_strategy']}, row_major={best_config['row_major']})")
+                    else:
+                        print(f"Best TFLOPS: {best_tflops:.3f} (Ordering=({best_config['ordering_0']},{best_config['ordering_1']}), WGM={best_config['WGM']}, WGN={best_config['WGN']})")
                 
                 print(f"Problem {problem_idx+1} completed successfully!")
                 

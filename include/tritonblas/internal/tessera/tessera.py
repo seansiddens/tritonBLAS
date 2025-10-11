@@ -526,6 +526,7 @@ def transform(
             new_grid_y = ((index - total_quantized_size) // non_quantized_x) % grid_y
             return (new_grid_y * grid_x) + new_grid_x
 
+# TODO: Support 3 levels of tiling.
 @triton.jit()
 def transform(
     index,

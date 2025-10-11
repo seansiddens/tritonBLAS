@@ -52,7 +52,7 @@ def benchmark_tessera_matmul(
     m, n, k, 
     ordering0, ordering1, 
     wgm, wgn, 
-    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T"):
+    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T", chunk_size=-1, row_major=1):
     """
     Benchmark tessera matmul and compare with reference implementation.
     
@@ -169,7 +169,7 @@ def benchmark_tessera_matmul(
 def benchmark_baseline_matmul(
     m, n, k, 
     wgm,
-    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T"):
+    dtype=torch.float16, warmup=20, rep=20, transA="T", transB="T", chunk_size=-1, row_major=1):
     print(f"Benchmarking baseline matmul:")
     print(f"  Dimensions: M={m}, N={n}, K={k}")
     print(f"  Workgroup: WGM={wgm}")
@@ -222,7 +222,7 @@ def benchmark_baseline_matmul(
     print(f"  Grid dimensions: {math.ceil(m/BLK_M)} x {math.ceil(n/BLK_N)}")
     print()
     
-    matmul = lambda: tritonblas.matmul_lt(A, B, C_reference, selector) 
+    matmul = lambda: tritonblas.matmul_lt(A, B, C_reference, selector, chunk_size, row_major) 
     ms = triton.testing.do_bench(matmul, warmup=warmup, rep=rep)
     tflops = tflops(ms)
     
@@ -258,6 +258,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=20, help="Warmup time (in ms)")
     parser.add_argument("--rep", type=int, default=20, help="Rep time (in ms)")
     parser.add_argument("--baseline", action="store_true", help="Run the tritonblas matmul baseline. Will use wgm value as gsize_m")
+    parser.add_argument("--chunk-size", type=int, default=-1, help="Chunk size for matmul operation")
+    parser.add_argument("--row-major", type=int, default=1, help="Row major flag for matmul operation")
     
     args = parser.parse_args()
     
@@ -281,7 +283,9 @@ def main():
             warmup=args.warmup,
             rep=args.rep,
             transA=transA,
-            transB=transB
+            transB=transB,
+            chunk_size=args.chunk_size,
+            row_major=args.row_major
         )
     
         if results is None:
@@ -299,7 +303,9 @@ def main():
             warmup=args.warmup,
             rep=args.rep,
             transA=transA,
-            transB=transB
+            transB=transB,
+            chunk_size=args.chunk_size,
+            row_major=args.row_major
         )
     
         if results is None:

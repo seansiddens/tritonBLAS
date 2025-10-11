@@ -3,6 +3,24 @@ import triton.language as tl
 from .tessera.tessera import transform, chiplet_transform
 import torch
 
+@triton.jit
+def remap_xcd_chunked(
+    pid, GRID_MN, NUM_XCDS: tl.constexpr = 8, CHUNK_SIZE: tl.constexpr = 2
+):
+    # Compute current XCD and local PID
+    xcd = pid % NUM_XCDS
+    # distribute the modulo pids in round robin
+    if pid > (GRID_MN // (NUM_XCDS * CHUNK_SIZE)) * (NUM_XCDS * CHUNK_SIZE):
+        return pid
+    local_pid = pid // NUM_XCDS
+    # Calculate chunk index and position within chunk
+    chunk_idx = local_pid // CHUNK_SIZE
+    pos_in_chunk = local_pid % CHUNK_SIZE
+    # Calculate new PID
+    new_pid = chunk_idx * NUM_XCDS * CHUNK_SIZE + xcd * CHUNK_SIZE + pos_in_chunk
+    return new_pid
+
+
 
 @triton.jit()
 def persistent_matmul(
@@ -28,11 +46,16 @@ def persistent_matmul(
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    chunk_size: tl.constexpr,
+    row_major: tl.constexpr,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+        if chunk_size < 0:
+            pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+        else:
+            pid = remap_xcd_chunked(pid, NUM_SMS, 8, chunk_size)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -47,12 +70,23 @@ def persistent_matmul(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        if row_major == 1:
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+        else:
+            num_pid_in_group = GROUP_SIZE_M * num_pid_m
+            group_id = tile_id // num_pid_in_group
+            first_pid_n = group_id * GROUP_SIZE_M
+            group_size_n = min(num_pid_n - first_pid_n, GROUP_SIZE_M)
+            local = tile_id % num_pid_in_group
+            pid_n = first_pid_n + (local % group_size_n)
+            pid_m = local // group_size_n
+
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
@@ -150,7 +184,9 @@ def persistent_matmul_tessera(
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+        # pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+        # Use area of L2 tile for chunk size.
+        pid = remap_xcd_chunked(pid, NUM_SMS, 8, wgm*wgn)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n

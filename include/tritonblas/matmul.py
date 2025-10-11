@@ -35,7 +35,7 @@ def _make_matmul_selector(
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
 
 
-def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
+def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, chunk_size, row_major):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -89,6 +89,8 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         waves_per_eu=waves_per_eu,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
+        chunk_size=chunk_size,
+        row_major=row_major
     )
 
     return c
@@ -238,14 +240,14 @@ def streamk_matmul_lt(
 
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, chunk_size, row_major, enable_streamk=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(a, b, c, selector, chunk_size, row_major)
 
 
 def matmul(
