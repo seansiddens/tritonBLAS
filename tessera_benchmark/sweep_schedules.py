@@ -404,7 +404,7 @@ def run_tessera_benchmark(
     wgm,
     wgn,
     arch,
-    dtype="float16",
+    dtype="bfloat16",
     bench_warmup_ms=10,
     bench_rep_ms=10,
     prof_warmup_ms=20,
@@ -501,6 +501,7 @@ def run_tessera_benchmark(
                 "ordering_name_1": get_ordering_name(ordering1),
                 "wgm": wgm,
                 "wgn": wgn,
+                "dtype": dtype,
                 "tflops": benchmark_data.get('tflops', 0),
                 "ms": benchmark_data.get('ms', 0),
                 "transA": benchmark_data["transA"],
@@ -632,6 +633,7 @@ def run_baseline_benchmark(
                 "transA": benchmark_data["transA"],
                 "transB": benchmark_data["transB"],
                 "init_type": benchmark_data["init_type"],
+                "dtype": dtype,
                 "chunk_size": chunk_size,
                 "row_major": row_major
             }
@@ -674,7 +676,7 @@ def sweep_matrix_problem(
     n,
     k,
     arch,
-    dtype="float16",
+    dtype="bfloat16",
     max_wgm=16,
     max_wgn=16,
     results_dir="results",
@@ -744,8 +746,23 @@ def sweep_matrix_problem(
 
     # Get optimal baseline:
     baseline_results = []
-    # Use max_wgm for baseline computation, but ensure we don't exceed grid constraints
-    baseline_wgm_values = [x for x in range(1, min(max_wgm, num_pid_m) + 1)]
+    # Use max_wgm for baseline computation, but ensure we don't exceed grid constraints.
+    # Always include the heuristic WGM even if it exceeds the grid so we can
+    # collect comparable baseline data for the predicted configuration.
+    baseline_wgm_values = {
+        x for x in range(1, min(max_wgm, num_pid_m) + 1)
+    }
+    if gsize_m is not None and gsize_m > 0:
+        if gsize_m > num_pid_m:
+            print(
+                f"Heuristic WGM {gsize_m} exceeds grid dimension {num_pid_m}; including it for baseline coverage."
+            )
+        if gsize_m > max_wgm:
+            print(
+                f"Heuristic WGM {gsize_m} exceeds configured max_wgm {max_wgm}; including it for baseline coverage."
+            )
+        baseline_wgm_values.add(gsize_m)
+    baseline_wgm_values = sorted(baseline_wgm_values)
     print(f"Computing baseline perf for WGMs: {baseline_wgm_values}...")
     
     if baseline_sweep:
@@ -802,6 +819,8 @@ def sweep_matrix_problem(
             optimal_tflops = -1
             optimal_ms = -1
             optimal_wgm = -1
+            heuristic_wgm = gsize_m
+            predicted_wgm_value = gsize_m
             predicted_tflops = None
             predicted_l2_hit_rate = None
             predicted_ms = None
@@ -819,6 +838,7 @@ def sweep_matrix_problem(
                         "wgm": benchmark_data.get("wgm"),
                         "tflops": benchmark_data.get("tflops"),
                         "ms": benchmark_data.get("ms"),
+                        "dtype": benchmark_data.get("dtype", dtype),
                         "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
                         "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None,
                         "chunk_size": actual_chunk_size,
@@ -840,17 +860,40 @@ def sweep_matrix_problem(
             
             # Check if predicted values were found for this combination
             if predicted_tflops is None:
-                raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m} with {strategy_name} chunking, row_major={row_major}. Available WGMs: {[res['wgm'] for res in strategy_results]}")
+                available_wgms = [res["wgm"] for res in strategy_results]
+                if not available_wgms:
+                    raise RuntimeError(
+                        f"No valid baseline results found for {strategy_name} chunking, row_major={row_major} - all baseline runs failed"
+                    )
+                fallback_wgm = min(available_wgms, key=lambda w: abs(w - gsize_m))
+                print(
+                    f"Warning: baseline data missing for heuristic WGM={gsize_m} "
+                    f"with {strategy_name} chunking, row_major={row_major}; "
+                    f"using closest available WGM={fallback_wgm}."
+                )
+                fallback_entry = next(
+                    (res for res in strategy_results if res["wgm"] == fallback_wgm),
+                    None,
+                )
+                if fallback_entry is None:
+                    raise RuntimeError(
+                        f"Could not resolve fallback baseline result for WGM={fallback_wgm}"
+                    )
+                predicted_wgm_value = fallback_entry["wgm"]
+                predicted_tflops = fallback_entry["tflops"]
+                predicted_l2_hit_rate = fallback_entry["l2_hit_rate"]
+                predicted_ms = fallback_entry["ms"]
             if optimal_tflops == -1:
                 raise RuntimeError(f"No valid baseline results found for {strategy_name} chunking, row_major={row_major} - all baseline runs failed")
             
             # Calculate chunk sizes for predicted and optimal values
-            predicted_chunk_size = chunk_size if chunk_size != None else gsize_m * gsize_m
+            predicted_chunk_size = chunk_size if chunk_size != None else predicted_wgm_value * predicted_wgm_value
             optimal_chunk_size = chunk_size if chunk_size != None else optimal_wgm * optimal_wgm
             
             combination_key = f"{strategy_name}_row_major_{row_major}"
             baseline_data[combination_key] = {
-                "predicted_wgm": gsize_m, 
+                "heuristic_wgm": heuristic_wgm,
+                "predicted_wgm": predicted_wgm_value, 
                 "predicted_chunk_size": predicted_chunk_size,
                 "predicted_row_major": row_major,
                 "predicted_tflops": predicted_tflops,
@@ -871,6 +914,8 @@ def sweep_matrix_problem(
         optimal_tflops = -1
         optimal_ms = -1
         optimal_wgm = -1
+        heuristic_wgm = gsize_m
+        predicted_wgm_value = gsize_m
         predicted_tflops = None
         predicted_l2_hit_rate = None
         predicted_ms = None
@@ -883,6 +928,7 @@ def sweep_matrix_problem(
                 "wgm": benchmark_data.get("wgm"),
                 "tflops": benchmark_data.get("tflops"),
                 "ms": benchmark_data.get("ms"),
+                "dtype": benchmark_data.get("dtype", dtype),
                 "l2_hit_rate": profiler_data.get("l2_hit_rate") if profiler_data else None,
                 "hit_rate_pct": profiler_data.get("hit_rate_pct") if profiler_data else None
             }
@@ -901,12 +947,33 @@ def sweep_matrix_problem(
 
         # Check if predicted values were found
         if predicted_tflops is None:
-            raise RuntimeError(f"Could not find baseline result for predicted WGM={gsize_m}. Available WGMs: {[res['benchmark_data']['wgm'] for res in baseline_results]}")
+            available_wgms = [res["benchmark_data"]["wgm"] for res in baseline_results]
+            fallback_wgm = min(available_wgms, key=lambda w: abs(w - gsize_m)) if available_wgms else None
+            if fallback_wgm is None:
+                raise RuntimeError("No valid baseline results found - all baseline runs failed")
+            print(
+                f"Warning: baseline data missing for heuristic WGM={gsize_m}; using closest available WGM={fallback_wgm}."
+            )
+            predicted_wgm_value = fallback_wgm
+            fallback_entry = next(
+                (res for res in baseline_results if res["benchmark_data"]["wgm"] == fallback_wgm),
+                None,
+            )
+            profiler_data = fallback_entry["profiler_data"] if fallback_entry else None
+            benchmark_data = fallback_entry["benchmark_data"] if fallback_entry else None
+            if benchmark_data is None:
+                raise RuntimeError(
+                    f"Could not resolve fallback baseline result for WGM={fallback_wgm}"
+                )
+            predicted_tflops = benchmark_data["tflops"]
+            predicted_l2_hit_rate = profiler_data["l2_hit_rate"] if profiler_data else None
+            predicted_ms = benchmark_data["ms"]
         if optimal_tflops == -1:
             raise RuntimeError("No valid baseline results found - all baseline runs failed")
 
         baseline_data = {
-            "predicted_wgm": gsize_m, 
+            "heuristic_wgm": heuristic_wgm,
+            "predicted_wgm": predicted_wgm_value, 
             "predicted_tflops": predicted_tflops,
             "predicted_l2_hit_rate": predicted_l2_hit_rate, 
             "predicted_ms": predicted_ms, 
@@ -940,6 +1007,7 @@ def sweep_matrix_problem(
             "k_tiles": math.ceil(k / 64)
         },
         "arch": arch,
+        "dtype": dtype,
         "total_combinations": total_combinations,
         "baseline_data": baseline_data
     }
@@ -1380,6 +1448,7 @@ def main():
     parser.add_argument("--prof-warmup-ms", type=int, default=50, help="Warmup duration (ms) for rocprof benchmark runs")
     parser.add_argument("--prof-rep-ms", type=int, default=100, help="Measurement duration (ms) for rocprof benchmark runs")
     parser.add_argument("--chunk-size", type=int, default=-1, help="Chunk size for matmul operation (only used for non-baseline-sweep mode)")
+    parser.add_argument("--start-problem", type=int, default=1, help="1-based index of the problem in the CSV to start processing from")
     
     # Single configuration mode arguments
     parser.add_argument("--single-config", action="store_true", help="Run single configuration instead of sweep")
@@ -1462,18 +1531,31 @@ def main():
                     category = None
                 matrix_problems.append({"m": m, "n": n, "k": k, "category": category})
         
-        print(f"Found {len(matrix_problems)} matrix problems in {args.csv_file}")
+        total_problems = len(matrix_problems)
+        print(f"Found {total_problems} matrix problems in {args.csv_file}")
         if args.baseline_sweep:
             print("Running in BASELINE SWEEP mode - only testing WGM values with baseline approach")
         
+        if args.start_problem < 1:
+            print(f"Error: --start-problem must be >= 1 (received {args.start_problem})")
+            sys.exit(1)
+        if args.start_problem > total_problems:
+            print(f"Error: --start-problem ({args.start_problem}) exceeds total problems ({total_problems})")
+            sys.exit(1)
+        if args.start_problem > 1:
+            print(f"Resuming sweep from problem {args.start_problem}. Earlier problems will be skipped.")
+        
         # Process each matrix problem
-        for problem_idx, problem in enumerate(matrix_problems):
+        for problem_idx, problem in enumerate(matrix_problems, start=1):
+            if problem_idx < args.start_problem:
+                print(f"Skipping problem {problem_idx}/{total_problems}: already processed.")
+                continue
             m = problem["m"]
             n = problem["n"]
             k = problem["k"]
             category = problem.get("category")
             print(f"\n{'='*80}")
-            print(f"Processing problem {problem_idx+1}/{len(matrix_problems)}: M={m}, N={n}, K={k}")
+            print(f"Processing problem {problem_idx}/{total_problems}: M={m}, N={n}, K={k}")
             if category:
                 print(f"Category: {category}")
             print(f"{'='*80}")
@@ -1511,13 +1593,13 @@ def main():
                     else:
                         print(f"Best TFLOPS: {best_tflops:.3f} (Ordering=({best_config['ordering_0']},{best_config['ordering_1']}), WGM={best_config['WGM']}, WGN={best_config['WGN']})")
                 
-                print(f"Problem {problem_idx+1} completed successfully!")
+                print(f"Problem {problem_idx} completed successfully!")
                 
             except KeyboardInterrupt:
-                print(f"\nInterrupted during problem {problem_idx+1}. Partial results saved.")
+                print(f"\nInterrupted during problem {problem_idx}. Partial results saved.")
                 break
             except Exception as e:
-                print(f"Error processing problem {problem_idx+1}: {e}")
+                print(f"Error processing problem {problem_idx}: {e}")
                 sys.exit(1)
         
         print(f"\nSweep completed! Results saved to {args.results_dir}/")
