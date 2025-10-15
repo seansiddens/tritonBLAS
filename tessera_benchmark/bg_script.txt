@@ -1,0 +1,2 @@
+nohup python3 /workspace/tessera_benchmark/sweep_schedules.py problems/sweep.csv --arch MI355X > sweep.log 2>&1 &
+ nohup python3 sweep_schedules.py problems/guillermo_large_1_rand_small_final.csv --baseline-sweep --arch MI355 --results-dir results_baseline/ --max-wgm 16 > sweep.log 2>&1 & 

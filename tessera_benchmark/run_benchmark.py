@@ -72,6 +72,7 @@ def benchmark_tessera_matmul(
     print(f"  Ordering: ({ordering0}, {ordering1})")
     print(f"  Workgroup: WGM={wgm}, WGN={wgn}")
     print(f"  Data type: {dtype}")
+    print(f"  Chunk size: {chunk_size}")
     print()
 
     # Adjust dimensions for transposition and apply tensor.T if needed
@@ -116,7 +117,9 @@ def benchmark_tessera_matmul(
     print(f"  Grid dimensions: {math.ceil(m/BLK_M)} x {math.ceil(n/BLK_N)}")
     print()
     
-    tessera_matmul = lambda: tritonblas.matmul_lt_tessera(A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn) 
+    tessera_matmul = lambda: tritonblas.matmul_lt_tessera(
+        A, B, C_tessera, selector, ordering0, ordering1, wgm, wgn, chunk_size=chunk_size
+    )
     tessera_ms = triton.testing.do_bench(tessera_matmul, warmup=warmup, rep=rep)
     tessera_tflops = tflops(tessera_ms)
     
@@ -126,6 +129,7 @@ def benchmark_tessera_matmul(
         'ordering1': ordering1,
         'wgm': wgm,
         'wgn': wgn,
+        'chunk_size': chunk_size,
         'dtype': str(dtype),
         'tflops': tessera_tflops,
         'ms': tessera_ms,
@@ -229,6 +233,7 @@ def benchmark_baseline_matmul(
     # Results for JSON output
     json_results = {
         'wgm': wgm,
+        'chunk_size': chunk_size,
         'dtype': str(dtype),
         'tflops': tflops,
         'ms': ms,

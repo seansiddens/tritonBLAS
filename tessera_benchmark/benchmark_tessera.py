@@ -48,13 +48,16 @@ class TesseraStrategy:
 class DefaultStrategy(TesseraStrategy):
     """Use CLI-provided defaults for Tessera scheduling."""
 
-    def __init__(self, ordering0: int, ordering1: int, wgm: int, wgn: int, dtype: str):
+    def __init__(
+        self, ordering0: int, ordering1: int, wgm: int, wgn: int, dtype: str, chunk_size: int
+    ):
         self.name = "default"
         self.ordering0 = ordering0
         self.ordering1 = ordering1
         self.wgm = wgm
         self.wgn = wgn
         self.dtype = dtype
+        self.chunk_size = chunk_size
 
     def select(self, metadata: Dict[str, Any]) -> Dict[str, Any]:  # pylint: disable=unused-argument
         return {
@@ -63,6 +66,7 @@ class DefaultStrategy(TesseraStrategy):
             "wgm": self.wgm,
             "wgn": self.wgn,
             "dtype": self.dtype,
+            "chunk_size": self.chunk_size,
         }
 
 
@@ -75,34 +79,174 @@ class HardwareL2Strategy(TesseraStrategy):
     def select(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         Decide Tessera parameters based on matrix metadata.
-
-        TODO: Implement strategy logic here. The `metadata` argument contains:
-          - matrix_dimensions, block_dimensions, grid, arch, category, etc.
-          - any baseline context stored in sweep JSONs.
-        Return a dict with schedule parameters, e.g.:
-          {
-              "ordering0": 0,
-              "ordering1": 0,
-              "wgm": 1,
-              "wgn": 1,
-              "dtype": "bfloat16",
-          }
         """
+
         # Temporary placeholder that mirrors the default schedule.
         matrix_dims = metadata.get("matrix_dimensions", {})
+        m = matrix_dims.get("m")
+        n = matrix_dims.get("n")
+        k = matrix_dims.get("k")
         block_dims = metadata.get("block_dimensions", {})
+        BLK_M = block_dims.get("BLK_M")
+        BLK_N = block_dims.get("BLK_N")
         grid_dims = metadata.get("grid", {})
+        grid_m = grid_dims.get("num_pid_m")
+        grid_n = grid_dims.get("num_pid_n")
         arch = metadata.get("arch")
         category = metadata.get("category")
-        # Add your scheduling heuristics below using the values above.
+
+        # For now, have the L2 level ordering just use column major
+        ordering1 = 1 # COLUMN_MAJOR
+
+        if category in {"Large_N_Block_Panel", "Large_N_K_Panel_Matrix"}:
+            # Grid is wider than it is tall, temporal timestep in column-major.
+            ordering0 = 1  
+            wgm = min(8, grid_m)
+            wgn = min(4, grid_n)
+        else: 
+            ordering0 = 0
+            wgm = min(4, grid_m)
+            wgn = min(8, grid_n)
+
+
+        # Set chunk size to area of L2 tile.
+        chunk_size = wgm * wgn
+
 
         # For now, fall back to a safe default.
         return {
-            "ordering0": 0,
-            "ordering1": 0,
-            "wgm": 1,
-            "wgn": 1,
+            "ordering0": ordering0,
+            "ordering1": ordering1,
+            "wgm": wgm,
+            "wgn": wgn,
             "dtype": metadata.get("dtype", "bfloat16"),
+            "chunk_size": chunk_size
+        }
+
+class QuantizedGridStrategy(TesseraStrategy):
+    """Placeholder for hardware/L2 driven heuristic."""
+
+    def __init__(self):
+        self.name = "L2_QUANTIZED_GRID"
+
+    def select(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decide Tessera parameters based on matrix metadata.
+        """
+
+        # Temporary placeholder that mirrors the default schedule.
+        matrix_dims = metadata.get("matrix_dimensions", {})
+        m = matrix_dims.get("m")
+        n = matrix_dims.get("n")
+        k = matrix_dims.get("k")
+        block_dims = metadata.get("block_dimensions", {})
+        BLK_M = block_dims.get("BLK_M")
+        BLK_N = block_dims.get("BLK_N")
+        grid_dims = metadata.get("grid", {})
+        grid_m = grid_dims.get("num_pid_m")
+        grid_n = grid_dims.get("num_pid_n")
+        arch = metadata.get("arch")
+        category = metadata.get("category")
+
+        # For now, have the L2 level ordering just use column major
+        ordering1 = 1 # COLUMN_MAJOR
+
+        WIDE_CATS = {"Large_N_Block_Panel", "Large_N_K_Panel_Matrix"}         # grid wider than tall
+        TALL_CATS = {"Large_M_Panel_Block", "Large_M_K_Matrix_Panel"}       # grid taller than wide
+
+        def choose_axis_tile(dim_len: int, max_tile: int = 8, target_remainders=(8, 4)) -> int:
+            """
+            Primary axis tile chooser:
+            1) exact divisor (largest first)
+            2) remainder in {8,4} (prefer 8, then 4; then larger tile)
+            3) remainder closest to {8,4} (then larger tile)
+            fallback -> 1
+            """
+            max_tile = min(max_tile, dim_len)
+
+            # 1) exact divisor (largest first)
+            for w in range(max_tile, 1, -1):
+                if dim_len % w == 0:
+                    return w
+
+            # 2) exact target remainder (prefer 8, then 4; then larger w)
+            pref_index = {r: i for i, r in enumerate(target_remainders)}
+            exact_hits = [w for w in range(max_tile, 1, -1) if (dim_len % w) in target_remainders]
+            if exact_hits:
+                exact_hits.sort(key=lambda w: (pref_index.get(dim_len % w, 999), -w))
+                return exact_hits[0]
+
+            # 3) closest to {8,4}; then larger w
+            def remainder_distance(w):
+                r = dim_len % w
+                return min(abs(r - tr) for tr in target_remainders)
+
+            candidates = list(range(max_tile, 1, -1))
+            if candidates:
+                return min(candidates, key=lambda w: (remainder_distance(w), -w))
+
+            return 1  # degenerate fallback
+
+
+        def choose_partner_tile(primary_tile: int, partner_len: int | None = None,
+                                max_tile: int = 8, target_area: int = 32) -> int:
+            """
+            Partner axis tile chooser to hit area≈target_area and keep near-square.
+            If partner_len is given, prefer divisors of partner_len; if none exist ≤ max_tile,
+            fall back to 1..max_tile.
+            """
+            divisors = [c for c in range(1, max_tile + 1) if (partner_len is None or partner_len % c == 0)]
+            candidates = divisors if divisors else list(range(1, max_tile + 1))
+            return min(candidates, key=lambda c: (abs(primary_tile * c - target_area), abs(c - primary_tile)))
+
+
+        if category in WIDE_CATS:
+            # Grid is wider than tall; timestep in column-major.
+            ordering0 = 1
+            max_primary = 8
+
+            # Primary along height (M): choose WGM first with divisor/remainder logic.
+            wgm = choose_axis_tile(grid_m, max_tile=max_primary, target_remainders=(8, 4))
+            # Partner along width (N): choose WGN to reach area≈32 and stay near-square; prefer divisors of N.
+            wgn = choose_partner_tile(wgm, partner_len=grid_n, max_tile=8, target_area=32)
+
+        elif category in TALL_CATS:
+            # Grid is taller than wide; timestep in row-major.
+            ordering0 = 0
+            max_primary = 8
+
+            # Primary along width (N): choose WGN first with the exact same divisor/remainder logic.
+            wgn = choose_axis_tile(grid_n, max_tile=max_primary, target_remainders=(8, 4))
+            # Partner along height (M): choose WGM to reach area≈32 and stay near-square; prefer divisors of M.
+            wgm = choose_partner_tile(wgn, partner_len=grid_m, max_tile=8, target_area=32)
+        elif category in {"Very_Large_Matrix_Matrix"}:
+            if grid_m > grid_n:
+                ordering0 = 0
+                wgn = choose_axis_tile(grid_n, max_tile=8, target_remainders=(8, 4))
+                wgm = choose_partner_tile(wgn, partner_len=grid_m, max_tile=8, target_area=32)
+            else:
+                ordering0 = 1
+                wgm = choose_axis_tile(grid_m, max_tile=8, target_remainders=(8, 4))
+                wgn = choose_partner_tile(wgm, partner_len=grid_n, max_tile=8, target_area=32)
+
+        else:
+            ordering0 = 0
+            wgm = min(4, grid_m)
+            wgn = min(8, grid_n)
+
+
+        # Set chunk size to area of L2 tile.
+        chunk_size = wgm * wgn
+
+
+        # For now, fall back to a safe default.
+        return {
+            "ordering0": ordering0,
+            "ordering1": ordering1,
+            "wgm": wgm,
+            "wgn": wgn,
+            "dtype": metadata.get("dtype", "bfloat16"),
+            "chunk_size": chunk_size
         }
 
 
@@ -114,11 +258,14 @@ def build_strategy_registry(args) -> Dict[str, TesseraStrategy]:
         args.wgm,
         args.wgn,
         args.dtype,
+        args.chunk_size,
     )
     hw_l2_strategy = HardwareL2Strategy()
+    quantized_grid_strategy = QuantizedGridStrategy()
     return {
-        default_strategy.name: default_strategy,
+        # default_strategy.name: default_strategy,
         hw_l2_strategy.name: hw_l2_strategy,
+        quantized_grid_strategy.name: quantized_grid_strategy
     }
 
 
@@ -135,6 +282,7 @@ def run_tessera_benchmark(
     wgm: int,
     wgn: int,
     dtype: str,
+    chunk_size: int,
     warmup_ms: int,
     rep_ms: int,
     timeout_seconds: int,
@@ -157,6 +305,8 @@ def run_tessera_benchmark(
         str(warmup_ms),
         "--rep",
         str(rep_ms),
+        "--chunk-size",
+        str(chunk_size),
     ]
 
     try:
@@ -265,6 +415,7 @@ def run_tessera_profiler(
     wgm: int,
     wgn: int,
     dtype: str,
+    chunk_size: int,
     warmup_ms: int,
     rep_ms: int,
     timeout_seconds: int,
@@ -299,6 +450,8 @@ def run_tessera_profiler(
         str(warmup_ms),
         "--rep",
         str(rep_ms),
+        "--chunk-size",
+        str(chunk_size),
     ]
 
     try:
@@ -496,6 +649,7 @@ def save_results(
                 "ordering_1": entry_copy.get("ordering_1"),
                 "WGM": entry_copy.get("WGM"),
                 "WGN": entry_copy.get("WGN"),
+                "chunk_size": entry_copy.get("chunk_size"),
                 "dtype": entry_copy.get("dtype"),
                 "tessera_l2_hit_rate_pct": (entry_copy.get("profiler_data") or {}).get(
                     "hit_rate_pct"
@@ -549,6 +703,7 @@ def save_results(
         "ordering_1",
         "WGM",
         "WGN",
+        "chunk_size",
         "dtype",
         "tessera_l2_hit_rate_pct",
         "tessera_tflops",
@@ -618,9 +773,15 @@ def parse_args() -> argparse.Namespace:
         help="Data type passed to run_benchmark.py (default: bfloat16).",
     )
     parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=-1,
+        help="Chunk size forwarded to Tessera matmul (default: -1, chiplet remap).",
+    )
+    parser.add_argument(
         "--strategies",
-        default="default",
-        help="Comma-separated list of strategy names to evaluate (default: default).",
+        default=None,
+        help="Comma-separated list of strategy names to evaluate (default: all registered strategies).",
     )
     parser.add_argument(
         "--bench-warmup-ms",
@@ -643,7 +804,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prof-rep-ms",
         type=int,
-        default=20,
+        default=100,
         help="Repeat duration (ms) for rocprof profiling run (default: 20).",
     )
     parser.add_argument(
@@ -676,9 +837,12 @@ def main() -> None:
         raise SystemExit(f"Baseline directory does not exist: {baseline_dir}")
 
     strategy_registry = build_strategy_registry(args)
-    requested_strategy_names = [
-        name.strip() for name in args.strategies.split(",") if name.strip()
-    ]
+    if args.strategies is None or args.strategies.strip().lower() == "all":
+        requested_strategy_names = list(strategy_registry.keys())
+    else:
+        requested_strategy_names = [
+            name.strip() for name in args.strategies.split(",") if name.strip()
+        ]
     if not requested_strategy_names:
         raise SystemExit("No strategies specified.")
 
@@ -743,10 +907,12 @@ def main() -> None:
             wgm = int(schedule.get("wgm", args.wgm))
             wgn = int(schedule.get("wgn", args.wgn))
             dtype = schedule.get("dtype", args.dtype)
+            sched_chunk_size = schedule.get("chunk_size", args.chunk_size)
+            chunk_size = int(sched_chunk_size if sched_chunk_size is not None else args.chunk_size)
 
             print(
                 f"  Strategy '{strategy.name}': ordering=({ordering0},{ordering1}), "
-                f"WGM={wgm}, WGN={wgn}, dtype={dtype}"
+                f"WGM={wgm}, WGN={wgn}, dtype={dtype}, chunk_size={chunk_size}"
             )
 
             try:
@@ -759,6 +925,7 @@ def main() -> None:
                     wgm,
                     wgn,
                     dtype,
+                    chunk_size,
                     args.bench_warmup_ms,
                     args.bench_rep_ms,
                     args.timeout_seconds,
@@ -777,6 +944,7 @@ def main() -> None:
                     wgm,
                     wgn,
                     dtype,
+                    chunk_size,
                     args.prof_warmup_ms,
                     args.prof_rep_ms,
                     args.timeout_seconds,
@@ -794,6 +962,7 @@ def main() -> None:
                 "WGM": wgm,
                 "WGN": wgn,
                 "dtype": dtype,
+                "chunk_size": chunk_size,
                 "tflops": tessera_results.get("tflops"),
                 "ms": tessera_results.get("ms"),
                 "transA": tessera_results.get("transA"),
