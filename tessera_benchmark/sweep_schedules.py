@@ -409,8 +409,9 @@ def run_tessera_benchmark(
     bench_rep_ms=10,
     prof_warmup_ms=20,
     prof_rep_ms=20,
+    use_miscope=False,
 ):
-    """Run a single benchmark with rocprof profiling and return results."""
+    """Run a single benchmark, optionally wrapping the warm benchmark with MiScope, then profile with rocprof."""
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -429,23 +430,43 @@ def run_tessera_benchmark(
             "--rep", str(bench_rep_ms)
         ]
 
-        # Benchmark first without rocprof, wrapped with miscope for metrics capture
-        metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
-        try:
-            miscope_result, _ = run_benchmark_with_miscope(
-                bench_cmd,
-                base_dir,
-                metrics_prefix=metrics_prefix,
-                gpu_ids=MISCOPE_GPU_ID,
-                timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
-            )
-        except BenchmarkTimeoutError as exc:
-            print(
-                f"[Timeout] MiScope benchmark timed out for m={m}, n={n}, k={k}: {exc}"
-            )
-            return None
-        if miscope_result is None:
-            return None
+        if use_miscope:
+            # Benchmark first without rocprof, wrapped with MiScope for metrics capture
+            metrics_prefix = build_miscope_prefix(arch, m, n, k, ordering0, ordering1, wgm, wgn, dtype)
+            try:
+                miscope_result, _ = run_benchmark_with_miscope(
+                    bench_cmd,
+                    base_dir,
+                    metrics_prefix=metrics_prefix,
+                    gpu_ids=MISCOPE_GPU_ID,
+                    timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
+                )
+            except BenchmarkTimeoutError as exc:
+                print(
+                    f"[Timeout] MiScope benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+                )
+                return None
+            if miscope_result is None:
+                return None
+        else:
+            # Run benchmark directly to collect TFLOP data from benchmark_results.json
+            print(f"Running benchmark without MiScope: {' '.join(shlex.quote(str(arg)) for arg in bench_cmd)}")
+            try:
+                bench_result = run_subprocess_with_timeout(
+                    bench_cmd,
+                    cwd=base_dir,
+                    timeout=BENCHMARK_TIMEOUT_SECONDS,
+                    capture_output=True,
+                    text=True,
+                )
+            except BenchmarkTimeoutError as exc:
+                print(
+                    f"[Timeout] Benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+                )
+                return None
+            if bench_result.returncode != 0:
+                print(f"Benchmark failed: {bench_result.stderr}")
+                return None
 
         # Read the JSON results from run_benchmark.py
         benchmark_data = None
@@ -531,8 +552,9 @@ def run_baseline_benchmark(
     prof_rep_ms=20,
     chunk_size=-1,
     row_major=1,
+    use_miscope=False,
 ):
-    """Run a single benchmark with rocprof profiling and return results."""
+    """Run a single baseline benchmark, optionally wrapping the warm benchmark with MiScope, then profile with rocprof."""
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         # Create input file for rocprof
@@ -553,23 +575,43 @@ def run_baseline_benchmark(
             "--row-major", str(row_major)
         ]
 
-        # Benchmark first without rocprof, wrapped with miscope for metrics capture
-        metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
-        try:
-            miscope_result, _ = run_benchmark_with_miscope(
-                bench_cmd,
-                base_dir,
-                metrics_prefix=metrics_prefix,
-                gpu_ids=MISCOPE_GPU_ID,
-                timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
-            )
-        except BenchmarkTimeoutError as exc:
-            print(
-                f"[Timeout] MiScope baseline benchmark timed out for m={m}, n={n}, k={k}: {exc}"
-            )
-            return None
-        if miscope_result is None:
-            return None
+        if use_miscope:
+            # Benchmark first without rocprof, wrapped with MiScope for metrics capture
+            metrics_prefix = build_baseline_miscope_prefix(arch, m, n, k, wgm, dtype)
+            try:
+                miscope_result, _ = run_benchmark_with_miscope(
+                    bench_cmd,
+                    base_dir,
+                    metrics_prefix=metrics_prefix,
+                    gpu_ids=MISCOPE_GPU_ID,
+                    timeout_seconds=BENCHMARK_TIMEOUT_SECONDS,
+                )
+            except BenchmarkTimeoutError as exc:
+                print(
+                    f"[Timeout] MiScope baseline benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+                )
+                return None
+            if miscope_result is None:
+                return None
+        else:
+            # Run benchmark directly to collect TFLOP data from benchmark_results.json
+            print(f"Running baseline benchmark without MiScope: {' '.join(shlex.quote(str(arg)) for arg in bench_cmd)}")
+            try:
+                bench_result = run_subprocess_with_timeout(
+                    bench_cmd,
+                    cwd=base_dir,
+                    timeout=BENCHMARK_TIMEOUT_SECONDS,
+                    capture_output=True,
+                    text=True,
+                )
+            except BenchmarkTimeoutError as exc:
+                print(
+                    f"[Timeout] Baseline benchmark timed out for m={m}, n={n}, k={k}: {exc}"
+                )
+                return None
+            if bench_result.returncode != 0:
+                print(f"Baseline benchmark failed: {bench_result.stderr}")
+                return None
 
         # Read the JSON results from run_benchmark.py
         benchmark_data = None
@@ -687,6 +729,7 @@ def sweep_matrix_problem(
     prof_rep_ms=20,
     baseline_sweep=False,
     problem_category=None,
+    use_miscope=False,
 ):
     """Sweep all configurations for a single matrix problem with progressive saving."""
     print(f"\nSweeping matrix problem: M={m}, N={n}, K={k}")
@@ -781,7 +824,8 @@ def sweep_matrix_problem(
                     m, n, k, wgm, arch, dtype=dtype,
                     bench_warmup_ms=bench_warmup_ms, bench_rep_ms=bench_rep_ms,
                     prof_warmup_ms=prof_warmup_ms, prof_rep_ms=prof_rep_ms,
-                    chunk_size=actual_chunk_size, row_major=row_major
+                    chunk_size=actual_chunk_size, row_major=row_major,
+                    use_miscope=use_miscope,
                 )
                 if baseline_result is not None:
                     baseline_results.append(baseline_result)
@@ -794,7 +838,8 @@ def sweep_matrix_problem(
                 m, n, k, wgm, arch, dtype=dtype,
                 bench_warmup_ms=bench_warmup_ms, bench_rep_ms=bench_rep_ms,
                 prof_warmup_ms=prof_warmup_ms, prof_rep_ms=prof_rep_ms,
-                chunk_size=-1
+                chunk_size=-1,
+                use_miscope=use_miscope,
             )
             if baseline_result is not None:
                 baseline_results.append(baseline_result)
@@ -1055,7 +1100,8 @@ def sweep_matrix_problem(
                         m, n, k, wgm, arch, dtype,
                         bench_warmup_ms, bench_rep_ms,
                         prof_warmup_ms, prof_rep_ms,
-                        chunk_size=chunk_size, row_major=row_major
+                        chunk_size=chunk_size, row_major=row_major,
+                        use_miscope=use_miscope,
                     )
                     
                     if result is not None:
@@ -1113,6 +1159,7 @@ def sweep_matrix_problem(
                     bench_rep_ms,
                     prof_warmup_ms,
                     prof_rep_ms,
+                    use_miscope=use_miscope,
                 )
             
                 if result is not None:
@@ -1252,7 +1299,8 @@ def run_single_configuration(
     ordering0=0, ordering1=0, baseline_only=False,
     results_dir="results",
     bench_warmup_ms=50, bench_rep_ms=1000,
-    prof_warmup_ms=50, prof_rep_ms=100
+    prof_warmup_ms=50, prof_rep_ms=100,
+    use_miscope=False,
 ):
     """Run a single configuration with profiling and save results."""
     print(f"\nRunning single configuration:")
@@ -1295,7 +1343,8 @@ def run_single_configuration(
         result = run_baseline_benchmark(
             m, n, k, wgm, arch, dtype,
             bench_warmup_ms, bench_rep_ms,
-            prof_warmup_ms, prof_rep_ms
+            prof_warmup_ms, prof_rep_ms,
+            use_miscope=use_miscope,
         )
         
         if result is not None:
@@ -1337,7 +1386,8 @@ def run_single_configuration(
         print("Running tessera benchmark...")
         result = run_tessera_benchmark(
             m, n, k, ordering0, ordering1, wgm, wgn, arch, dtype,
-            bench_warmup_ms, bench_rep_ms, prof_warmup_ms, prof_rep_ms
+            bench_warmup_ms, bench_rep_ms, prof_warmup_ms, prof_rep_ms,
+            use_miscope=use_miscope,
         )
         
         if result is not None:
@@ -1443,12 +1493,13 @@ def main():
     parser.add_argument("--max-wgn", type=int, default=8, help="Maximum WGN value")
     parser.add_argument("--results-dir", default="results", help="Results directory")
     parser.add_argument("--arch", type=str, required=True)
-    parser.add_argument("--bench-warmup-ms", type=int, default=50, help="Warmup duration (ms) for miscope (non-rocprof) benchmark runs")
-    parser.add_argument("--bench-rep-ms", type=int, default=1000, help="Measurement duration (ms) for miscope (non-rocprof) benchmark runs")
+    parser.add_argument("--bench-warmup-ms", type=int, default=50, help="Warmup duration (ms) for warm (non-rocprof) benchmark runs")
+    parser.add_argument("--bench-rep-ms", type=int, default=1000, help="Measurement duration (ms) for warm (non-rocprof) benchmark runs")
     parser.add_argument("--prof-warmup-ms", type=int, default=50, help="Warmup duration (ms) for rocprof benchmark runs")
     parser.add_argument("--prof-rep-ms", type=int, default=100, help="Measurement duration (ms) for rocprof benchmark runs")
     parser.add_argument("--chunk-size", type=int, default=-1, help="Chunk size for matmul operation (only used for non-baseline-sweep mode)")
     parser.add_argument("--start-problem", type=int, default=1, help="1-based index of the problem in the CSV to start processing from")
+    parser.add_argument("--enable-miscope", action="store_true", help="Wrap warm benchmark runs with MiScope for additional metrics capture")
     
     # Single configuration mode arguments
     parser.add_argument("--single-config", action="store_true", help="Run single configuration instead of sweep")
@@ -1483,7 +1534,8 @@ def main():
                 args.m, args.n, args.k, args.wgm, wgn, args.arch, args.dtype,
                 args.ordering0, args.ordering1, args.baseline_only,
                 args.results_dir, args.bench_warmup_ms, args.bench_rep_ms,
-                args.prof_warmup_ms, args.prof_rep_ms
+                args.prof_warmup_ms, args.prof_rep_ms,
+                use_miscope=args.enable_miscope,
             )
             
             if results is not None:
@@ -1578,6 +1630,7 @@ def main():
                     args.prof_rep_ms,
                     args.baseline_sweep,
                     problem_category=category,
+                    use_miscope=args.enable_miscope,
                 )
                 
                 # Print summary
