@@ -96,7 +96,15 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     return c
 
 def persistent_matmul_lt_tessera(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, ordering0: int, ordering1: int, wgm: int, wgn: int
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    ordering0: int,
+    ordering1: int,
+    wgm: int,
+    wgn: int,
+    chunk_size: int = -1,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -149,6 +157,7 @@ def persistent_matmul_lt_tessera(
         NUM_XCDS=8,
         BIAS=False,
         EVEN_K=even_k,
+        chunk_size=chunk_size,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -267,7 +276,19 @@ def matmul(
     else:
         return persistent_matmul_lt(a, b, c, selector)
 
-def matmul_lt_tessera(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, ordering0: int, ordering1: int, wgm: int, wgn: int):
+def matmul_lt_tessera(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    ordering0: int,
+    ordering1: int,
+    wgm: int,
+    wgn: int,
+    chunk_size: int = -1,
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
-    return persistent_matmul_lt_tessera(a, b, c, selector, ordering0, ordering1, wgm, wgn)
+    return persistent_matmul_lt_tessera(
+        a, b, c, selector, ordering0, ordering1, wgm, wgn, chunk_size=chunk_size
+    )

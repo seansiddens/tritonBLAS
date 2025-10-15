@@ -180,13 +180,15 @@ def persistent_matmul_tessera(
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    chunk_size: tl.constexpr,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        # pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
-        # Use area of L2 tile for chunk size.
-        pid = remap_xcd_chunked(pid, NUM_SMS, 8, wgm*wgn)
+        if chunk_size < 0:
+            pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
+        else:
+            pid = remap_xcd_chunked(pid, NUM_SMS, 8, chunk_size)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
