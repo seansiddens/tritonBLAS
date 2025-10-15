@@ -433,6 +433,62 @@ def transform_quantized(
     
     return new_grid_y * grid_x + new_grid_x
 
+@triton.jit()
+def transform_quantized_depth3(
+    index,
+    grid_y,
+    grid_x,
+    ordering0,  # timestep / outer ordering
+    ordering1,  # L3 ordering
+    ordering2,  # L2 ordering
+    L3Y,
+    L3X,
+    L2Y,
+    L2X,
+):
+    """
+    Quantized transform for a 3-level tiling:
+      - Level 2 (inner):  L2X x L2Y, ordered by ordering2
+      - Level 3 (middle): L3X x L3Y, ordered by ordering1
+      - Timestep (outer): (grid_x/(L2X*L3X)) x (grid_y/(L2Y*L3Y)), ordered by ordering0
+    Accumulates coordinates in mixed-radix fashion, just like depth-2.
+    """
+    new_grid_x = 0
+    new_grid_y = 0
+    cumulative_denominator = 1  # product of bases already decoded
+    cumulative_x = 1            # stride contributed in x by inner levels
+    cumulative_y = 1            # stride contributed in y by inner levels
+
+    # ---- Level 2: within an L3 tile (micro / L2 tile) ----
+    level_x_idx, level_y_idx, cumulative_denominator = compute_level_index(
+        index, L2X, L2Y, ordering2, cumulative_denominator
+    )
+    new_grid_x += level_x_idx * cumulative_x
+    new_grid_y += level_y_idx * cumulative_y
+    cumulative_x *= L2X
+    cumulative_y *= L2Y
+
+    # ---- Level 3: which L2-tile group (L3 tile) ----
+    level_x_idx, level_y_idx, cumulative_denominator = compute_level_index(
+        index, L3X, L3Y, ordering1, cumulative_denominator
+    )
+    new_grid_x += level_x_idx * cumulative_x
+    new_grid_y += level_y_idx * cumulative_y
+    cumulative_x *= L3X
+    cumulative_y *= L3Y
+
+    # ---- Timestep / outer grid of L3 tiles ----
+    outer_x = grid_x // (L2X * L3X)
+    outer_y = grid_y // (L2Y * L3Y)
+    level_x_idx, level_y_idx, cumulative_denominator = compute_level_index(
+        index, outer_x, outer_y, ordering0, cumulative_denominator
+    )
+    new_grid_x += level_x_idx * cumulative_x
+    new_grid_y += level_y_idx * cumulative_y
+
+    return new_grid_y * grid_x + new_grid_x
+
+
 def transform_quantized_cpu(
     index,
     grid_y,
@@ -526,14 +582,68 @@ def transform(
             new_grid_y = ((index - total_quantized_size) // non_quantized_x) % grid_y
             return (new_grid_y * grid_x) + new_grid_x
 
+@triton.jit()
+def transform_depth3(
+    index,
+    grid_y,
+    grid_x,
+    ordering0, # Grid ordering
+    ordering1, # L3 ordering
+    ordering2, # L2 Ordering
+    L3Y,
+    L3X,
+    L2Y, # WGM
+    L2X, # WGN
+):
+    # --- Quantization setup (depth-3: L3 over L2) ---
+    l2_tile_size = L2Y * L2X
+    l3_tile_size = L3Y * L3X
+    combined_tile_size = l2_tile_size * l3_tile_size
+
+    timestep_x_dim = L2X * L3X
+    timestep_y_dim = L2Y * L3Y
+
+    temporal_x_count = grid_x // timestep_x_dim
+    temporal_y_count = grid_y // timestep_y_dim
+
+    quantized_x = temporal_x_count * timestep_x_dim
+    quantized_y = temporal_y_count * timestep_y_dim
+
+    non_quantized_x = grid_x - quantized_x
+    non_quantized_y = grid_y - quantized_y
+
+    total_quantized_size = quantized_x * quantized_y
+    y_region_start = (total_quantized_size - 1) + (non_quantized_x * grid_y)
+
+    # --- Quantized region: delegate to depth-3 quantized transform ---
+    if index <= total_quantized_size - 1:
+        return transform_quantized_depth3(
+            index, grid_y, grid_x,
+            ordering0, ordering1, ordering2,
+            L3Y, L3X, L2Y, L2X
+        )
+
+    # --- Non-quantized regions (match the C++ logic) ---
+    # Y tail region
+    if index > y_region_start:
+        # Safe: this branch only happens when non_quantized_y > 0
+        new_grid_x = ((index - total_quantized_size - (non_quantized_x * grid_y)) // non_quantized_y) % grid_x
+        new_grid_y = quantized_y + (index % non_quantized_y)
+        return new_grid_y * grid_x + new_grid_x
+    else:
+        # X tail region (only when non_quantized_x > 0)
+        new_grid_x = quantized_x + (index % non_quantized_x)
+        new_grid_y = ((index - total_quantized_size) // non_quantized_x) % grid_y
+        return (new_grid_y * grid_x) + new_grid_x
+
 # TODO: Support 3 levels of tiling.
 @triton.jit()
 def transform(
     index,
     grid_y,
     grid_x,
-    ordering0,
-    ordering1,
+    ordering0, # Grid ordering
+    ordering1, # L2 Ordering
     wgm,
     wgn
 ):
