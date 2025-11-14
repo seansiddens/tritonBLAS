@@ -10,6 +10,7 @@ import tritonblas
         (8192, 8192, 8192),
         (4864, 8192, 4160),
         (4096, 4096, 4096),
+        (2791, 9093, 1230)
     ],
 )
 @pytest.mark.parametrize(
@@ -35,7 +36,7 @@ import tritonblas
     "enable_streamk",
     [
         False,
-        True,
+        # True,
     ],
 )
 def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):

@@ -3,7 +3,13 @@ import triton
 import random
 import functools
 import time
-from .internal.persistent_matmul import persistent_matmul
+import math
+from .internal.persistent_matmul import (
+    persistent_matmul,
+    persistent_matmul_shuffled,
+    persistent_matmul_debug_map,
+    persistent_matmul_debug_map_shuffled,
+)
 from .internal.streamk_matmul import streamk_matmul
 from .origami import MatmulHeuristicResult
 from typing import Dict, Tuple, Optional
@@ -35,7 +41,51 @@ def _make_matmul_selector(
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
 
 
-def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector):
+def _is_power_of_two(x: int) -> bool:
+    return x > 0 and (x & (x - 1)) == 0
+
+
+def _choose_lcg_params(
+    n: int,
+    seed: Optional[int] = None,
+    rng: Optional[random.Random] = None,
+) -> Tuple[int, int]:
+    if n <= 1:
+        raise ValueError("shuffle requires at least two tiles in the grid")
+    rng = rng or (random.Random(seed) if seed is not None else random.Random())
+    if _is_power_of_two(n):
+        valid_as = [a for a in range(5, n, 4)]
+        if not valid_as:
+            valid_as = [a for a in range(1, n, 2) if a != 1]
+        valid_cs = list(range(n))
+    else:
+        valid_as = [a for a in range(1, n) if math.gcd(a, n) == 1 and a != 1]
+        if not valid_as:
+            valid_as = [a for a in range(1, n) if math.gcd(a, n) == 1]
+        valid_cs = list(range(n))
+    if not valid_as or not valid_cs:
+        raise ValueError("No valid LCG parameters for given n")
+    a = rng.choice(valid_as)
+    c = rng.choice(valid_cs)
+    return a, c
+
+
+def choose_lcg_shuffle_params(
+    num_tiles: int,
+    seed: Optional[int] = None,
+    rng: Optional[random.Random] = None,
+) -> Tuple[int, int]:
+    return _choose_lcg_params(num_tiles, seed=seed, rng=rng)
+
+
+def persistent_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    workgroup_schedule: str = "default",
+    shuffle_seed: Optional[int] = None,
+):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -61,19 +111,19 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
     grids = total_tiles
 
     # TODO: Support other matmul algs.
-    kk = persistent_matmul[(grids,)](
-        a,
-        b,
-        c,
-        None,  # TODO: Enable bias.
-        M,
-        N,
-        K,
-        a.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        0,  # TODO: Enable bias stride.
+    kernel_kwargs = dict(
+        A=a,
+        B=b,
+        C=c,
+        bias_ptr=None,
+        M=M,
+        N=N,
+        K=K,
+        stride_am=a.stride(0),
+        stride_bn=b.stride(1),
+        stride_cm=c.stride(0),
+        stride_cn=c.stride(1),
+        stride_bias=0,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -84,6 +134,19 @@ def persistent_matmul_lt(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, sele
         NUM_XCDS=8,
         BIAS=False,
         EVEN_K=even_k,
+    )
+
+    if workgroup_schedule == "default":
+        kernel = persistent_matmul
+    elif workgroup_schedule == "random":
+        a_lcg, c_lcg = _choose_lcg_params(total_tiles, seed=shuffle_seed)
+        kernel = persistent_matmul_shuffled
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
+    else:
+        raise ValueError(f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default' or 'random'.")
+
+    kernel[(grids,)](
+        **kernel_kwargs,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -175,14 +238,86 @@ def streamk_matmul_lt(
 
 
 def matmul_lt(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, selector, enable_streamk=False
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    enable_streamk=False,
+    workgroup_schedule: str = "default",
+    shuffle_seed: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
+        if workgroup_schedule != "default":
+            raise ValueError("workgroup_schedule customization is only supported for persistent matmul.")
         return streamk_matmul_lt(a, b, c, selector)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(
+            a,
+            b,
+            c,
+            selector,
+            workgroup_schedule=workgroup_schedule,
+            shuffle_seed=shuffle_seed,
+        )
+
+
+def compute_persistent_workgroup_map(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    c_dtype: torch.dtype,
+    num_xcds: int = 8,
+    workgroup_schedule: str = "default",
+    shuffle_seed: Optional[int] = None,
+):
+    selector = _make_matmul_selector(M, N, K, a_dtype, b_dtype, c_dtype)
+    BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    grids = total_tiles
+    workgroup_map = torch.empty(total_tiles, device="cuda", dtype=torch.int32)
+    kernel_kwargs = dict(
+        workgroup_map=workgroup_map,
+        M=M,
+        N=N,
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=grids,
+        NUM_XCDS=num_xcds,
+    )
+    config = {
+        "BLK_M": BLK_M,
+        "BLK_N": BLK_N,
+        "BLK_K": BLK_K,
+        "GROUP_SIZE_M": gsize_m,
+        "NUM_XCDS": num_xcds,
+        "workgroup_schedule": workgroup_schedule,
+    }
+    if workgroup_schedule == "default":
+        kernel = persistent_matmul_debug_map
+    elif workgroup_schedule == "random":
+        print("Doing random mapping")
+        a_lcg, c_lcg = _choose_lcg_params(total_tiles, seed=shuffle_seed)
+        kernel = persistent_matmul_debug_map_shuffled
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
+        config["LCG_A"] = a_lcg
+        config["LCG_C"] = c_lcg
+    else:
+        raise ValueError(
+            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default' or 'random'."
+        )
+
+    kernel[(grids,)](**kernel_kwargs)
+    return (
+        workgroup_map.view(total_blocks_M, total_blocks_N),
+        config,
+    )
 
 
 def matmul(
@@ -191,6 +326,8 @@ def matmul(
     c: torch.Tensor,
     enable_streamk=False,
     sk_grid=None,
+    workgroup_schedule: str = "default",
+    shuffle_seed: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -200,4 +337,11 @@ def matmul(
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, sk_grid=sk_grid)
     else:
-        return persistent_matmul_lt(a, b, c, selector)
+        return persistent_matmul_lt(
+            a,
+            b,
+            c,
+            selector,
+            workgroup_schedule=workgroup_schedule,
+            shuffle_seed=shuffle_seed,
+        )
