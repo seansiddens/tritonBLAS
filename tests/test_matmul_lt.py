@@ -73,3 +73,22 @@ def test_matmul(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
     # Check correctnes: Fix tolerance later
     torch_c = torch.matmul(A, B)
     torch.testing.assert_close(C.to(out_dtype), torch_c, atol=1, rtol=1)
+
+
+def test_matmul_random_schedule():
+    m = n = k = 8192
+    dtype = torch.float16
+    A = torch.randn((m, k), device="cuda", dtype=dtype)
+    B = torch.randn((k, n), device="cuda", dtype=dtype)
+    C = torch.zeros((m, n), device="cuda", dtype=dtype)
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, dtype, dtype, dtype)
+    tritonblas.matmul_lt(
+        A,
+        B,
+        C,
+        selector,
+        enable_streamk=False,
+        workgroup_schedule="random",
+        shuffle_seed=0,
+    )
+    torch.testing.assert_close(C, torch.matmul(A, B), atol=1, rtol=1)

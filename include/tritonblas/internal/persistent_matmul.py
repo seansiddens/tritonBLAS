@@ -57,6 +57,51 @@ def swizzle_tile_l2(
     return new_grid_y * grid_x + new_grid_x
 
 
+@triton.jit
+def swizzle_tile_l2_shuffled(
+    idx,
+    grid_y,
+    grid_x,
+    TileDimY: tl.constexpr,
+    TileDimX: tl.constexpr,
+    LCG_A,
+    LCG_C,
+):
+    quantized_x = (grid_x // TileDimX) * TileDimX
+    quantized_y = (grid_y // TileDimY) * TileDimY
+    total_quantized_size = quantized_x * quantized_y
+    non_quantized_x = grid_x - quantized_x
+    non_quantized_y = grid_y - quantized_y
+    y_region_start = (total_quantized_size - 1) + (non_quantized_x * grid_y)
+
+    if idx > total_quantized_size - 1:
+        if idx > y_region_start:
+            new_grid_x = (
+                (idx - total_quantized_size - (non_quantized_x * grid_y)) // non_quantized_y
+            ) % grid_x
+            new_grid_y = quantized_y + (idx % non_quantized_y)
+            return new_grid_y * grid_x + new_grid_x
+        else:
+            new_grid_x = quantized_x + (idx % non_quantized_x)
+            new_grid_y = ((idx - total_quantized_size) // non_quantized_x) % grid_y
+            return (new_grid_y * grid_x) + new_grid_x
+
+    tile_x_idx = idx % TileDimX
+    tile_y_idx = (idx // TileDimX) % TileDimX
+    tiles_per_row = grid_x // TileDimX
+    tiles_per_col = grid_y // TileDimX
+    num_l2_tiles = tiles_per_row * tiles_per_col
+    tile_linear_idx = idx // (TileDimX * TileDimY)
+    safe_num_tiles = tl.where(num_l2_tiles > 0, num_l2_tiles, 1)
+    shuffled_tile_idx = (LCG_A * tile_linear_idx + LCG_C) % safe_num_tiles
+    shuffled_tile_idx = tl.where(num_l2_tiles > 1, shuffled_tile_idx, tile_linear_idx)
+    temporal_x = shuffled_tile_idx % tiles_per_row
+    temporal_y = shuffled_tile_idx // tiles_per_row
+    new_grid_x = temporal_x * TileDimX + tile_x_idx
+    new_grid_y = temporal_y * TileDimY + tile_y_idx
+    return new_grid_y * grid_x + new_grid_x
+
+
 @triton.jit()
 def persistent_matmul(
     A,
@@ -238,9 +283,17 @@ def persistent_matmul_shuffled(
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        shuffled_pid = (LCG_A * tile_id + LCG_C) % total_tiles
-        pid_m = shuffled_pid // num_pid_n
-        pid_n = shuffled_pid % num_pid_n
+        swizzled_pid = swizzle_tile_l2_shuffled(
+            tile_id,
+            num_pid_m,
+            num_pid_n,
+            TileDimY=GROUP_SIZE_M,
+            TileDimX=GROUP_SIZE_M,
+            LCG_A=LCG_A,
+            LCG_C=LCG_C,
+        )
+        pid_m = swizzled_pid // num_pid_n
+        pid_n = swizzled_pid % num_pid_n
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
@@ -371,5 +424,13 @@ def persistent_matmul_debug_map_shuffled(
     total_tiles = num_pid_m * num_pid_n
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        shuffled_pid = (LCG_A * tile_id + LCG_C) % total_tiles
-        tl.store(workgroup_map + shuffled_pid, original_pid)
+        swizzled_pid = swizzle_tile_l2_shuffled(
+            tile_id,
+            num_pid_m,
+            num_pid_n,
+            TileDimY=GROUP_SIZE_M,
+            TileDimX=GROUP_SIZE_M,
+            LCG_A=LCG_A,
+            LCG_C=LCG_C,
+        )
+        tl.store(workgroup_map + swizzled_pid, original_pid)

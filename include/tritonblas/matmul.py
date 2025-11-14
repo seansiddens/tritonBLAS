@@ -41,6 +41,16 @@ def _make_matmul_selector(
     return MatmulHeuristicResult(M, N, K, a_dtype, b_dtype, c_dtype)
 
 
+def _count_quantized_l2_tiles(num_pid_m: int, num_pid_n: int, tile_dim: int) -> int:
+    if tile_dim <= 0:
+        return 0
+    quantized_m = (num_pid_m // tile_dim) * tile_dim
+    quantized_n = (num_pid_n // tile_dim) * tile_dim
+    tiles_per_row = quantized_n // tile_dim
+    tiles_per_col = quantized_m // tile_dim
+    return tiles_per_row * tiles_per_col
+
+
 def _is_power_of_two(x: int) -> bool:
     return x > 0 and (x & (x - 1)) == 0
 
@@ -97,6 +107,7 @@ def persistent_matmul_lt(
     total_tiles = total_blocks_M * total_blocks_N
     total_programs = total_tiles
     even_k = K % BLK_K == 0
+    num_l2_tiles = _count_quantized_l2_tiles(total_blocks_M, total_blocks_N, gsize_m)
 
     # TODO: Separate these configs.
     # basica configs for most of compute bound sizes
@@ -139,7 +150,11 @@ def persistent_matmul_lt(
     if workgroup_schedule == "default":
         kernel = persistent_matmul
     elif workgroup_schedule == "random":
-        a_lcg, c_lcg = _choose_lcg_params(total_tiles, seed=shuffle_seed)
+        if num_l2_tiles <= 1:
+            raise ValueError(
+                "Random workgroup schedule requires at least two full L2 tiles in the quantized region."
+            )
+        a_lcg, c_lcg = _choose_lcg_params(num_l2_tiles, seed=shuffle_seed)
         kernel = persistent_matmul_shuffled
         kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
     else:
@@ -281,6 +296,7 @@ def compute_persistent_workgroup_map(
     total_tiles = total_blocks_M * total_blocks_N
     grids = total_tiles
     workgroup_map = torch.empty(total_tiles, device="cuda", dtype=torch.int32)
+    num_l2_tiles = _count_quantized_l2_tiles(total_blocks_M, total_blocks_N, gsize_m)
     kernel_kwargs = dict(
         workgroup_map=workgroup_map,
         M=M,
@@ -298,12 +314,16 @@ def compute_persistent_workgroup_map(
         "GROUP_SIZE_M": gsize_m,
         "NUM_XCDS": num_xcds,
         "workgroup_schedule": workgroup_schedule,
+        "NUM_L2_TILES": num_l2_tiles,
     }
     if workgroup_schedule == "default":
         kernel = persistent_matmul_debug_map
     elif workgroup_schedule == "random":
-        print("Doing random mapping")
-        a_lcg, c_lcg = _choose_lcg_params(total_tiles, seed=shuffle_seed)
+        if num_l2_tiles <= 1:
+            raise ValueError(
+                "Random workgroup schedule requires at least two full L2 tiles in the quantized region."
+            )
+        a_lcg, c_lcg = _choose_lcg_params(num_l2_tiles, seed=shuffle_seed)
         kernel = persistent_matmul_debug_map_shuffled
         kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
         config["LCG_A"] = a_lcg

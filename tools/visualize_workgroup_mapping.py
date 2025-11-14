@@ -31,7 +31,14 @@ def visualize_mapping(args):
         workgroup_schedule=args.workgroup_schedule,
         shuffle_seed=args.shuffle_seed,
     )
-    grid = workgroup_map.cpu().numpy()
+    grid_tensor = workgroup_map.to(torch.int64)
+    sorted_vals, _ = torch.sort(grid_tensor.flatten())
+    expected_vals = torch.arange(grid_tensor.numel(), device=grid_tensor.device, dtype=grid_tensor.dtype)
+    if not torch.equal(sorted_vals, expected_vals):
+        raise ValueError("Workgroup mapping is not bijective.")
+    else:
+        print("Mapping is bijective.")
+    grid = grid_tensor.cpu().numpy()
     color_data = grid % args.num_xcds
 
     num_pid_m = grid.shape[0]
@@ -42,28 +49,31 @@ def visualize_mapping(args):
         f"M={args.m}, N={args.n}, K={args.k} | "
         f"num_pid_m={num_pid_m}, num_pid_n={num_pid_n}, total_tiles={total_tiles} | "
         f"BLK_M={config['BLK_M']}, BLK_N={config['BLK_N']}, BLK_K={config['BLK_K']} | "
-        f"GROUP_SIZE_M={config['GROUP_SIZE_M']}, NUM_XCDS={config['NUM_XCDS']}, CHUNK_SIZE={chunk_size} | "
+        f"GROUP_SIZE_M={config['GROUP_SIZE_M']}, NUM_XCDS={config['NUM_XCDS']}, CHUNK_SIZE={chunk_size}, NUM_L2_TILES={config['NUM_L2_TILES']} | "
         f"schedule={config['workgroup_schedule']}"
     )
     if config["workgroup_schedule"] == "random":
         message += f", LCG_A={config['LCG_A']}, LCG_C={config['LCG_C']}"
     print(message)
-    print("\nWorkgroup remap grid (transformed_pid -> original_pid):")
-    for row in grid:
-        print(" ".join(f"{int(val):4d}" for val in row))
+    # print("\nWorkgroup remap grid (transformed_pid -> original_pid):")
+    # for row in grid:
+    #     print(" ".join(f"{int(val):4d}" for val in row))
 
     fig, ax = plt.subplots(figsize=(args.figsize, args.figsize))
     cmap = plt.get_cmap("tab20", args.num_xcds)
-    im = ax.imshow(color_data, cmap=cmap, interpolation="nearest")
+    norm = plt.Normalize(vmin=0, vmax=max(args.num_xcds - 1, 1))
+    colored = cmap(norm(color_data))
+    if args.timestep is not None:
+        timestep_mask = (grid // 256) != args.timestep
+        colored[timestep_mask, :3] *= 0.2
+    im = ax.imshow(colored, interpolation="nearest")
     ax.set_title(
         f"Persistent Matmul Workgroup Mapping ({config['workgroup_schedule']})\n"
         f"M={args.m}, N={args.n}, K={args.k}, "
         f"BLK_M={config['BLK_M']}, BLK_N={config['BLK_N']}, GROUP={config['GROUP_SIZE_M']}"
     )
-    ax.set_xlabel("pid_n (tile columns)")
-    ax.set_ylabel("pid_m (tile rows)")
-    cbar = fig.colorbar(im, ticks=list(range(args.num_xcds)))
-    cbar.set_label("Original pid % NUM_XCDS")
+    ax.set_xlabel("pid_n")
+    ax.set_ylabel("pid_m")
 
     if args.annotate:
         rows, cols = grid.shape
@@ -124,6 +134,12 @@ def main():
         type=str,
         default="workgroup_mapping.png",
         help="Path to save the rendered figure (PNG).",
+    )
+    parser.add_argument(
+        "--timestep",
+        type=int,
+        default=None,
+        help="Highlight only workgroups whose timestep (original_pid // 256) matches this value.",
     )
     args = parser.parse_args()
     visualize_mapping(args)
