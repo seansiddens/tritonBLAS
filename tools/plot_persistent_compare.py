@@ -56,14 +56,16 @@ def arithmetic_intensity(m: int, n: int, k: int, bytes_per_elem: int) -> float:
     return flops / bytes_moved
 
 
-def load_points(csv_path: Path) -> dict[str, tuple[list[float], list[float]]]:
+def load_points(csv_path: Path) -> tuple[dict[str, tuple[list[float], list[float]]], int]:
     points = {
         "default": ([], []),
         "shuffled": ([], []),
     }
+    total_rows = 0
     with csv_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            total_rows += 1
             try:
                 m = int(row["m"])
                 n = int(row["n"])
@@ -85,19 +87,28 @@ def load_points(csv_path: Path) -> dict[str, tuple[list[float], list[float]]]:
             if not math.isnan(shuffled_gflops):
                 points["shuffled"][0].append(ai)
                 points["shuffled"][1].append(shuffled_gflops / 1000)
-    return points
+    return points, total_rows
 
 
 def plot(points: dict[str, tuple[list[float], list[float]]], title: str, output_path: Path) -> None:
     plt.figure(figsize=(10, 6))
     colors = {"default": "tab:blue", "shuffled": "tab:orange"}
+    labels = {"default": "baseline", "shuffled": "random"}
 
     for label, (x_vals, y_vals) in points.items():
         if not x_vals:
             continue
-        plt.scatter(x_vals, y_vals, label=label, alpha=0.75, edgecolors="none", s=40, color=colors[label])
+        plt.scatter(
+            x_vals,
+            y_vals,
+            label=labels[label],
+            alpha=0.75,
+            edgecolors="none",
+            s=40,
+            color=colors[label],
+        )
 
-    plt.xlabel("Arithmetic Intensity (FLOPs / Byte)")
+    plt.xlabel("Arithmetic Intensity")
     plt.ylabel("TFLOP/s")
     plt.title(title)
     plt.legend()
@@ -114,11 +125,13 @@ def main() -> None:
         raise SystemExit(f"CSV file not found: {csv_path}")
 
     output_path = args.output or Path(f"{csv_path.stem}_ai_scatter.png")
-    title = args.title or f"Arithmetic Intensity vs GFLOP/s ({csv_path.stem})"
 
-    points = load_points(csv_path)
+    points, total_rows = load_points(csv_path)
     if not any(points[label][0] for label in points):
         raise SystemExit("No valid data points to plot.")
+
+    default_title = f"Random vs Baseline L2 Grid Schedules ({total_rows} problems)"
+    title = args.title or default_title
 
     plot(points, title, output_path)
 
