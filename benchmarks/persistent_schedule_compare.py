@@ -92,89 +92,6 @@ def main():
         else f"{Path(args.input_yaml).stem}_persistent_compare.csv"
     )
 
-    rows = []
-    comparisons: list[tuple[float, float]] = []
-    for case in problems:
-        m = case["m"]
-        n = case["n"]
-        k = case["k"]
-        in_dtype = str_to_dtype(case["in_dtype"])
-        out_dtype = str_to_dtype(case["out_dtype"])
-        transA = case.get("transA", "T")
-        transB = case.get("transB", "T")
-
-        if transA == "T":
-            A_size = (m, k)
-        else:
-            A_size = (k, m)
-
-        if transB == "T":
-            B_size = (k, n)
-        else:
-            B_size = (n, k)
-
-        A = randn_like(A_size, in_dtype)
-        B = randn_like(B_size, in_dtype)
-
-        if transA == "N":
-            A = A.T
-        if transB == "N":
-            B = B.T
-
-        selector = tritonblas.MatmulHeuristicResult(m, n, k, in_dtype, in_dtype, out_dtype)
-        config = selector.get_config()
-        gsize_m = config[3]
-        total_blocks_m = int(triton.cdiv(m, config[0]))
-        total_blocks_n = int(triton.cdiv(n, config[1]))
-        num_l2_tiles = count_l2_tiles(total_blocks_m, total_blocks_n, gsize_m)
-
-        C_default = torch.zeros((m, n), device="cuda", dtype=out_dtype)
-        default_ms = matmul_time(A, B, C_default, selector, "default", None)
-
-        shuffled_ms = float("nan")
-        shuffled_gflops = float("nan")
-        if num_l2_tiles > 1:
-            C_random = torch.zeros((m, n), device="cuda", dtype=out_dtype)
-            shuffled_ms = matmul_time(
-                A, B, C_random, selector, "random", args.shuffle_seed
-            )
-            shuffled_gflops = (
-                2 * m * n * k * 1e-9 / (shuffled_ms * 1e-3) if shuffled_ms > 0 else float("nan")
-            )
-
-        default_gflops = 2 * m * n * k * 1e-9 / (default_ms * 1e-3)
-
-        row = {
-            "m": m,
-            "n": n,
-            "k": k,
-            "in_dtype": str(in_dtype),
-            "out_dtype": str(out_dtype),
-            "transA": transA,
-            "transB": transB,
-            "macro_tile": f"{config[0]}x{config[1]}x{config[2]}",
-            "group_size_m": gsize_m,
-            "num_l2_tiles": num_l2_tiles,
-            "default_us": default_ms / 1000,
-            "default_gflops": default_gflops,
-            "shuffled_us": (shuffled_ms / 1000) if num_l2_tiles > 1 else float("nan"),
-            "shuffled_gflops": shuffled_gflops,
-        }
-        rows.append(row)
-        if num_l2_tiles > 1 and not math.isnan(shuffled_gflops):
-            comparisons.append((default_gflops, shuffled_gflops))
-
-        if args.verbose:
-            msg = (
-                f"m={m}, n={n}, k={k}, in={in_dtype}, out={out_dtype}, "
-                f"default={default_gflops:.2f} GF/s"
-            )
-            if num_l2_tiles > 1:
-                msg += f", shuffled={shuffled_gflops:.2f} GF/s"
-            else:
-                msg += ", shuffled=N/A (insufficient L2 tiles)"
-            print(msg)
-
     fieldnames = [
         "m",
         "n",
@@ -191,12 +108,118 @@ def main():
         "shuffled_us",
         "shuffled_gflops",
     ]
+    rows = []
+    comparisons: list[tuple[float, float]] = []
+    errors: list[str] = []
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+
+        for idx, case in enumerate(problems):
+            m = case["m"]
+            n = case["n"]
+            k = case["k"]
+            transA = case.get("transA", "T")
+            transB = case.get("transB", "T")
+            try:
+                in_dtype = str_to_dtype(case["in_dtype"])
+                out_dtype = str_to_dtype(case["out_dtype"])
+
+                if transA == "T":
+                    A_size = (m, k)
+                else:
+                    A_size = (k, m)
+
+                if transB == "T":
+                    B_size = (k, n)
+                else:
+                    B_size = (n, k)
+
+                A = randn_like(A_size, in_dtype)
+                B = randn_like(B_size, in_dtype)
+
+                if transA == "N":
+                    A = A.T
+                if transB == "N":
+                    B = B.T
+
+                selector = tritonblas.MatmulHeuristicResult(
+                    m, n, k, in_dtype, in_dtype, out_dtype
+                )
+                config = selector.get_config()
+                gsize_m = config[3]
+                total_blocks_m = int(triton.cdiv(m, config[0]))
+                total_blocks_n = int(triton.cdiv(n, config[1]))
+                num_l2_tiles = count_l2_tiles(total_blocks_m, total_blocks_n, gsize_m)
+
+                C_default = torch.zeros((m, n), device="cuda", dtype=out_dtype)
+                default_ms = matmul_time(A, B, C_default, selector, "default", None)
+
+                shuffled_ms = float("nan")
+                shuffled_gflops = float("nan")
+                if num_l2_tiles > 1:
+                    C_random = torch.zeros((m, n), device="cuda", dtype=out_dtype)
+                    shuffled_ms = matmul_time(
+                        A, B, C_random, selector, "random", args.shuffle_seed
+                    )
+                    shuffled_gflops = (
+                        2 * m * n * k * 1e-9 / (shuffled_ms * 1e-3)
+                        if shuffled_ms > 0
+                        else float("nan")
+                    )
+
+                default_gflops = 2 * m * n * k * 1e-9 / (default_ms * 1e-3)
+
+                row = {
+                    "m": m,
+                    "n": n,
+                    "k": k,
+                    "in_dtype": str(in_dtype),
+                    "out_dtype": str(out_dtype),
+                    "transA": transA,
+                    "transB": transB,
+                    "macro_tile": f"{config[0]}x{config[1]}x{config[2]}",
+                    "group_size_m": gsize_m,
+                    "num_l2_tiles": num_l2_tiles,
+                    "default_us": default_ms / 1000,
+                    "default_gflops": default_gflops,
+                    "shuffled_us": (shuffled_ms / 1000) if num_l2_tiles > 1 else float("nan"),
+                    "shuffled_gflops": shuffled_gflops,
+                }
+                writer.writerow(row)
+                f.flush()
+                rows.append(row)
+                if num_l2_tiles > 1 and not math.isnan(shuffled_gflops):
+                    comparisons.append((default_gflops, shuffled_gflops))
+
+                if args.verbose:
+                    msg = (
+                        f"[{idx+1}/{len(problems)}] m={m}, n={n}, k={k}, "
+                        f"in={in_dtype}, out={out_dtype}, default={default_gflops:.2f} GF/s"
+                    )
+                    if num_l2_tiles > 1:
+                        msg += f", shuffled={shuffled_gflops:.2f} GF/s"
+                    else:
+                        msg += ", shuffled=N/A (insufficient L2 tiles)"
+                    print(msg)
+            except Exception as exc:
+                err_msg = (
+                    f"[{idx+1}/{len(problems)}] ERROR for m={m}, n={n}, k={k}, "
+                    f"transA={transA}, transB={transB}: {exc}"
+                )
+                print(err_msg)
+                errors.append(err_msg)
+                continue
 
     print(f"Wrote {len(rows)} benchmark rows to {output_csv}")
+    if rows:
+        print(f"Wrote {len(rows)} benchmark rows to {output_csv}")
+    else:
+        print("No benchmark rows were written due to errors.")
+
+    if errors:
+        print(f"{len(errors)} cases failed and were skipped; see messages above.")
+
     if comparisons:
         num_cases = len(comparisons)
         default_better = sum(1 for d, s in comparisons if d > s)
