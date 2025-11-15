@@ -1,4 +1,4 @@
-"""Utility to sample matrix multiplication problems from a categorized CSV."""
+"""Sample N GEMM problems from a given category and emit them as YAML."""
 
 from __future__ import annotations
 
@@ -13,37 +13,40 @@ DEFAULT_OUT_DTYPE = "bfloat16"
 DEFAULT_TRANSA = "N"
 DEFAULT_TRANSB = "T"
 
+BF16_BYTES = 2
+TWO_GB_BYTES = 2_147_483_648
+MAX_ELEMENTS_PER_MATRIX = TWO_GB_BYTES // BF16_BYTES  # 1,073,741,824 elements
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "csv_path",
-        type=Path,
-        help="Path to the categorized CSV (e.g. datasets/Guillermo_Large_1_categorized.csv)",
+    parser = argparse.ArgumentParser(
+        description=(
+            "Pick N random problems from the requested category (or every category if omitted) "
+            "and write a YAML list."
+        )
     )
+    parser.add_argument("csv_path", type=Path, help="Path to categorized CSV input file")
     parser.add_argument(
         "--category",
-        required=True,
-        help="Problem category to sample from (case insensitive)",
+        help="Category name to sample from (omit to sample from every category)",
     )
     parser.add_argument(
         "--count",
         "-n",
         type=int,
         required=True,
-        help="How many problems to sample",
+        help="Number of rows to sample",
     )
     parser.add_argument(
         "--output",
         "-o",
         type=str,
-        help="Optional output filename (written next to this script)",
+        help="Optional output filename (default auto-generated in script directory)",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
-        help="Optional seed for reproducible sampling",
+        help="Optional random seed for reproducible sampling",
     )
     return parser.parse_args()
 
@@ -55,34 +58,86 @@ def load_rows(csv_path: Path) -> list[dict[str, str]]:
     with csv_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         rows = list(reader)
-        required = {"m", "n", "k", "category"}
-        missing = required.difference(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
-        return rows
+        fieldnames = reader.fieldnames or []
+
+    required_columns = {"m", "n", "k", "category", "batch_count"}
+    missing = required_columns.difference(fieldnames)
+    if missing:
+        raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
+
+    return rows
 
 
-def filter_by_category(rows: list[dict[str, str]], category: str) -> list[dict[str, str]]:
+def filter_batch_count(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    filtered: list[dict[str, str]] = []
+    for row in rows:
+        try:
+            batch_count = int(row.get("batch_count", 0))
+        except (TypeError, ValueError):
+            continue
+        if batch_count == 1:
+            filtered.append(row)
+    return filtered
+
+
+def filter_category(rows: list[dict[str, str]], category: str) -> list[dict[str, str]]:
     category_lower = category.lower()
     return [row for row in rows if row.get("category", "").lower() == category_lower]
+
+
+def filter_matrix_size(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    filtered: list[dict[str, str]] = []
+    for row in rows:
+        try:
+            m = int(row["m"])
+            n = int(row["n"])
+            k = int(row["k"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unable to parse m/n/k as integers for row: {row}") from exc
+
+        if (
+            m * k < MAX_ELEMENTS_PER_MATRIX
+            and k * n < MAX_ELEMENTS_PER_MATRIX
+            and m * n < MAX_ELEMENTS_PER_MATRIX
+        ):
+            filtered.append(row)
+    return filtered
+
+
+def filter_min_grid(rows: list[dict[str, str]], min_tiles: int) -> list[dict[str, str]]:
+    threshold = 256 * min_tiles
+    return [
+        row
+        for row in rows
+        if int(row["m"]) > threshold and int(row["n"]) > threshold
+    ]
 
 
 def select_rows(rows: list[dict[str, str]], count: int, rng: random.Random) -> list[dict[str, str]]:
     if count <= 0:
         raise ValueError("--count must be positive")
     if len(rows) < count:
-        raise ValueError(f"Requested {count} problems but only found {len(rows)} in the category")
+        raise ValueError(f"Requested {count} rows but only {len(rows)} available after filtering")
     return rng.sample(rows, count)
 
 
-def build_problem(row: dict[str, str]) -> dict[str, int | str]:
-    try:
-        m = int(row["m"])
-        n = int(row["n"])
-        k = int(row["k"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Failed to convert m/n/k to integers for row: {row}") from exc
+def select_rows_per_category(
+    groups: dict[str, list[dict[str, str]]], count: int, rng: random.Random
+) -> list[dict[str, str]]:
+    selected: list[dict[str, str]] = []
+    for category, rows in sorted(groups.items()):
+        if len(rows) < count:
+            raise ValueError(
+                f"Category '{category}' only has {len(rows)} rows available after filtering"
+            )
+        selected.extend(rng.sample(rows, count))
+    return selected
 
+
+def build_problem(row: dict[str, str]) -> dict[str, int | str]:
+    m = int(row["m"])
+    n = int(row["n"])
+    k = int(row["k"])
     return {
         "in_dtype": DEFAULT_IN_DTYPE,
         "out_dtype": DEFAULT_OUT_DTYPE,
@@ -97,21 +152,26 @@ def build_problem(row: dict[str, str]) -> dict[str, int | str]:
 def format_yaml(problems: list[dict[str, int | str]]) -> str:
     lines: list[str] = []
     for problem in problems:
-        lines.append("- in_dtype: {}".format(problem["in_dtype"]))
-        lines.append("  out_dtype: {}".format(problem["out_dtype"]))
-        lines.append("  transA: {}".format(problem["transA"]))
-        lines.append("  transB: {}".format(problem["transB"]))
-        lines.append("  m: {}".format(problem["m"]))
-        lines.append("  n: {}".format(problem["n"]))
-        lines.append("  k: {}".format(problem["k"]))
+        lines.append(f"- in_dtype: {problem['in_dtype']}")
+        lines.append(f"  out_dtype: {problem['out_dtype']}")
+        lines.append(f"  transA: {problem['transA']}")
+        lines.append(f"  transB: {problem['transB']}")
+        lines.append(f"  m: {problem['m']}")
+        lines.append(f"  n: {problem['n']}")
+        lines.append(f"  k: {problem['k']}")
     return "\n".join(lines) + "\n"
 
 
-def determine_output_path(script_dir: Path, category: str, count: int, override: str | None) -> Path:
+def determine_output_path(
+    script_dir: Path, category: str | None, count: int, override: str | None
+) -> Path:
     if override:
         return script_dir / override
-    safe_category = "".join(ch if ch.isalnum() else "_" for ch in category.lower()).strip("_")
-    filename = f"{safe_category or 'problems'}_{count}.yaml"
+    if category:
+        safe_category = "".join(ch if ch.isalnum() else "_" for ch in category.lower()).strip("_")
+        filename = f"{safe_category or 'problems'}_{count}.yaml"
+    else:
+        filename = f"all_categories_{count}.yaml"
     return script_dir / filename
 
 
@@ -120,17 +180,38 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     rows = load_rows(args.csv_path)
-    filtered = filter_by_category(rows, args.category)
-    if not filtered:
-        raise ValueError(f"No rows found for category '{args.category}'")
+    rows = filter_batch_count(rows)
+    if not rows:
+        raise SystemExit("No rows with batch_count == 1 found in the CSV.")
 
-    selected = select_rows(filtered, args.count, rng)
+    rows = filter_matrix_size(rows)
+    if not rows:
+        raise SystemExit("No rows satisfy bf16 matrix < 2GB constraints after batch filtering.")
+
+    rows = filter_min_grid(rows, 5)
+    if not rows:
+        raise SystemExit("No rows satisfy the minimum grid requirement (m/256 > 5 and n/256 > 5).")
+
+    if args.category:
+        filtered = filter_category(rows, args.category)
+        if not filtered:
+            raise SystemExit(f"No rows found for category '{args.category}' after filtering")
+        selected = select_rows(filtered, args.count, rng)
+    else:
+        groups: dict[str, list[dict[str, str]]] = {}
+        for row in rows:
+            cat = row["category"]
+            groups.setdefault(cat, []).append(row)
+        if not groups:
+            raise SystemExit("No categories remain after filtering.")
+        selected = select_rows_per_category(groups, args.count, rng)
+
     problems = [build_problem(row) for row in selected]
 
     script_dir = Path(__file__).resolve().parent
     output_path = determine_output_path(script_dir, args.category, args.count, args.output)
-    yaml_contents = format_yaml(problems)
-    output_path.write_text(yaml_contents)
+    contents = format_yaml(problems)
+    output_path.write_text(contents)
     print(f"Wrote {len(problems)} problems to {output_path}")
 
 
