@@ -18,8 +18,32 @@ def parse_dtype(dtype_str: str) -> torch.dtype:
     return mapping[dtype_str]
 
 
+def parse_hierarchical_config(arg: str | None):
+    if arg is None:
+        return None
+    parts = [p.strip() for p in arg.split(",") if p.strip()]
+    if len(parts) != 7:
+        raise ValueError(
+            "hierarchical-config must provide 7 comma-separated ints: "
+            "ordering0,ordering1,ordering2,L3Y,L3X,L2Y,L2X."
+        )
+    ints = list(map(int, parts))
+    return tritonblas.HierarchicalPersistentConfig(
+        ordering0=ints[0],
+        ordering1=ints[1],
+        ordering2=ints[2],
+        L3Y=ints[3],
+        L3X=ints[4],
+        L2Y=ints[5],
+        L2X=ints[6],
+    )
+
+
 def visualize_mapping(args):
     dtype = parse_dtype(args.dtype)
+    hierarchical_config = parse_hierarchical_config(args.hierarchical_config)
+    if args.workgroup_schedule == "hierarchical" and hierarchical_config is None:
+        raise ValueError("hierarchical-config argument is required when using the hierarchical schedule.")
     workgroup_map, config = tritonblas.compute_persistent_workgroup_map(
         args.m,
         args.n,
@@ -30,6 +54,7 @@ def visualize_mapping(args):
         num_xcds=args.num_xcds,
         workgroup_schedule=args.workgroup_schedule,
         shuffle_seed=args.shuffle_seed,
+        hierarchical_config=hierarchical_config,
     )
     grid_tensor = workgroup_map.to(torch.int64)
     sorted_vals, _ = torch.sort(grid_tensor.flatten())
@@ -44,7 +69,10 @@ def visualize_mapping(args):
     num_pid_m = grid.shape[0]
     num_pid_n = grid.shape[1]
     total_tiles = num_pid_m * num_pid_n
-    chunk_size = config["GROUP_SIZE_M"] * config["GROUP_SIZE_M"]
+    if config["workgroup_schedule"] == "hierarchical":
+        chunk_size = config["chunk_size"]
+    else:
+        chunk_size = config["GROUP_SIZE_M"] * config["GROUP_SIZE_M"]
     message = (
         f"M={args.m}, N={args.n}, K={args.k} | "
         f"num_pid_m={num_pid_m}, num_pid_n={num_pid_n}, total_tiles={total_tiles} | "
@@ -54,6 +82,11 @@ def visualize_mapping(args):
     )
     if config["workgroup_schedule"] == "random":
         message += f", LCG_A={config['LCG_A']}, LCG_C={config['LCG_C']}"
+    elif config["workgroup_schedule"] == "hierarchical":
+        message += (
+            f", ordering0={config['ordering0']}, ordering1={config['ordering1']}, ordering2={config['ordering2']}, "
+            f"L3Y={config['L3Y']}, L3X={config['L3X']}, L2Y={config['L2Y']}, L2X={config['L2X']}, chunk_size={config['chunk_size']}"
+        )
     print(message)
     # print("\nWorkgroup remap grid (transformed_pid -> original_pid):")
     # for row in grid:
@@ -109,7 +142,7 @@ def main():
         "--workgroup-schedule",
         type=str,
         default="default",
-        choices=["default", "random"],
+        choices=["default", "random", "hierarchical"],
         help="Workgroup scheduling strategy to visualize.",
     )
     parser.add_argument(
@@ -117,6 +150,12 @@ def main():
         type=int,
         default=None,
         help="Optional seed when using the random workgroup schedule.",
+    )
+    parser.add_argument(
+        "--hierarchical-config",
+        type=str,
+        default=None,
+        help="Comma-separated ordering0,ordering1,ordering2,L3Y,L3X,L2Y,L2X when schedule=hierarchical.",
     )
     parser.add_argument(
         "--figsize",

@@ -4,11 +4,14 @@ import random
 import functools
 import time
 import math
+from dataclasses import dataclass
 from .internal.persistent_matmul import (
     persistent_matmul,
     persistent_matmul_shuffled,
     persistent_matmul_debug_map,
     persistent_matmul_debug_map_shuffled,
+    persistent_matmul_hierarchical,
+    persistent_matmul_debug_map_hierarchical,
 )
 from .internal.streamk_matmul import streamk_matmul
 from .origami import MatmulHeuristicResult
@@ -24,6 +27,40 @@ MAX_BLOCK_SIZE = 65536
 # Global pre-allocated buffers
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+@dataclass(frozen=True)
+class HierarchicalPersistentConfig:
+    ordering0: int
+    ordering1: int
+    ordering2: int
+    L3Y: int
+    L3X: int
+    L2Y: int
+    L2X: int
+
+    def __post_init__(self):
+        dim_fields = ("L3Y", "L3X", "L2Y", "L2X")
+        for name in dim_fields:
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"{name} must be > 0 for hierarchical schedule (got {value}).")
+
+    @property
+    def chunk_size(self) -> int:
+        return self.L2Y * self.L2X
+
+    def to_kernel_kwargs(self) -> Dict[str, int]:
+        return {
+            "ordering0": self.ordering0,
+            "ordering1": self.ordering1,
+            "ordering2": self.ordering2,
+            "L3Y": self.L3Y,
+            "L3X": self.L3X,
+            "L2Y": self.L2Y,
+            "L2X": self.L2X,
+            "chunk_size": self.chunk_size,
+        }
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -95,6 +132,7 @@ def persistent_matmul_lt(
     selector,
     workgroup_schedule: str = "default",
     shuffle_seed: Optional[int] = None,
+    hierarchical_config: Optional[HierarchicalPersistentConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -140,7 +178,6 @@ def persistent_matmul_lt(
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
         NUM_SMS=total_programs,
         NUM_XCDS=8,
         BIAS=False,
@@ -149,6 +186,7 @@ def persistent_matmul_lt(
 
     if workgroup_schedule == "default":
         kernel = persistent_matmul
+        kernel_kwargs.update({"GROUP_SIZE_M": gsize_m})
     elif workgroup_schedule == "random":
         if num_l2_tiles <= 1:
             raise ValueError(
@@ -156,9 +194,16 @@ def persistent_matmul_lt(
             )
         a_lcg, c_lcg = _choose_lcg_params(num_l2_tiles, seed=shuffle_seed)
         kernel = persistent_matmul_shuffled
-        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
+    elif workgroup_schedule == "hierarchical":
+        if hierarchical_config is None:
+            raise ValueError("hierarchical_config is required when workgroup_schedule='hierarchical'.")
+        kernel = persistent_matmul_hierarchical
+        kernel_kwargs.update(hierarchical_config.to_kernel_kwargs())
     else:
-        raise ValueError(f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default' or 'random'.")
+        raise ValueError(
+            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'random', or 'hierarchical'."
+        )
 
     kernel[(grids,)](
         **kernel_kwargs,
@@ -260,6 +305,7 @@ def matmul_lt(
     enable_streamk=False,
     workgroup_schedule: str = "default",
     shuffle_seed: Optional[int] = None,
+    hierarchical_config: Optional[HierarchicalPersistentConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
@@ -275,6 +321,7 @@ def matmul_lt(
             selector,
             workgroup_schedule=workgroup_schedule,
             shuffle_seed=shuffle_seed,
+            hierarchical_config=hierarchical_config,
         )
 
 
@@ -288,6 +335,7 @@ def compute_persistent_workgroup_map(
     num_xcds: int = 8,
     workgroup_schedule: str = "default",
     shuffle_seed: Optional[int] = None,
+    hierarchical_config: Optional[HierarchicalPersistentConfig] = None,
 ):
     selector = _make_matmul_selector(M, N, K, a_dtype, b_dtype, c_dtype)
     BLK_M, BLK_N, BLK_K, gsize_m = selector.get_config()
@@ -303,7 +351,6 @@ def compute_persistent_workgroup_map(
         N=N,
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
-        GROUP_SIZE_M=gsize_m,
         NUM_SMS=grids,
         NUM_XCDS=num_xcds,
     )
@@ -318,6 +365,7 @@ def compute_persistent_workgroup_map(
     }
     if workgroup_schedule == "default":
         kernel = persistent_matmul_debug_map
+        kernel_kwargs.update({"GROUP_SIZE_M": gsize_m})
     elif workgroup_schedule == "random":
         if num_l2_tiles <= 1:
             raise ValueError(
@@ -325,12 +373,18 @@ def compute_persistent_workgroup_map(
             )
         a_lcg, c_lcg = _choose_lcg_params(num_l2_tiles, seed=shuffle_seed)
         kernel = persistent_matmul_debug_map_shuffled
-        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg})
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
         config["LCG_A"] = a_lcg
         config["LCG_C"] = c_lcg
+    elif workgroup_schedule == "hierarchical":
+        if hierarchical_config is None:
+            raise ValueError("hierarchical_config is required when workgroup_schedule='hierarchical'.")
+        kernel = persistent_matmul_debug_map_hierarchical
+        kernel_kwargs.update(hierarchical_config.to_kernel_kwargs())
+        config.update(hierarchical_config.to_kernel_kwargs())
     else:
         raise ValueError(
-            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default' or 'random'."
+            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'random', or 'hierarchical'."
         )
 
     kernel[(grids,)](**kernel_kwargs)
@@ -348,6 +402,7 @@ def matmul(
     sk_grid=None,
     workgroup_schedule: str = "default",
     shuffle_seed: Optional[int] = None,
+    hierarchical_config: Optional[HierarchicalPersistentConfig] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -364,4 +419,5 @@ def matmul(
             selector,
             workgroup_schedule=workgroup_schedule,
             shuffle_seed=shuffle_seed,
+            hierarchical_config=hierarchical_config,
         )

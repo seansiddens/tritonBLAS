@@ -17,6 +17,20 @@ YAML_PROBLEMS = [
 ]
 
 
+def make_hierarchical_config(selector):
+    _, _, _, gsize_m = selector.get_config()
+    tile = max(int(gsize_m), 1)
+    return tritonblas.HierarchicalPersistentConfig(
+        ordering0=0,
+        ordering1=0,
+        ordering2=0,
+        L3Y=1,
+        L3X=1,
+        L2Y=tile,
+        L2X=tile,
+    )
+
+
 @pytest.mark.parametrize(
     "m, n, k",
     [
@@ -51,6 +65,41 @@ def test_persistent_random_schedule(m, n, k, dtype):
     torch.testing.assert_close(C, torch.matmul(A, B), atol=1, rtol=1)
 
 
+@pytest.mark.parametrize(
+    "m, n, k",
+    [
+        (8192, 8192, 8192),
+        (6144, 4096, 4096),
+        (4864, 8192, 4160),
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float16,
+        torch.bfloat16,
+    ],
+)
+def test_persistent_hierarchical_schedule(m, n, k, dtype):
+    A = torch.randn((m, k), device="cuda", dtype=dtype)
+    B = torch.randn((k, n), device="cuda", dtype=dtype)
+    C = torch.zeros((m, n), device="cuda", dtype=dtype)
+
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, dtype, dtype, dtype)
+    hier_config = make_hierarchical_config(selector)
+    tritonblas.matmul_lt(
+        A,
+        B,
+        C,
+        selector,
+        enable_streamk=False,
+        workgroup_schedule="hierarchical",
+        hierarchical_config=hier_config,
+    )
+
+    torch.testing.assert_close(C, torch.matmul(A, B), atol=1, rtol=1)
+
+
 @pytest.mark.parametrize("m, n, k", YAML_PROBLEMS)
 def test_persistent_random_schedule_yaml_cases(m, n, k):
     dtype = torch.bfloat16
@@ -67,6 +116,28 @@ def test_persistent_random_schedule_yaml_cases(m, n, k):
         enable_streamk=False,
         workgroup_schedule="random",
         shuffle_seed=0,
+    )
+
+    torch.testing.assert_close(C, torch.matmul(A, B), atol=1, rtol=1)
+
+
+@pytest.mark.parametrize("m, n, k", YAML_PROBLEMS)
+def test_persistent_hierarchical_schedule_yaml_cases(m, n, k):
+    dtype = torch.bfloat16
+    A = torch.randn((m, k), device="cuda", dtype=dtype)
+    B = torch.randn((k, n), device="cuda", dtype=dtype)
+    C = torch.zeros((m, n), device="cuda", dtype=dtype)
+
+    selector = tritonblas.MatmulHeuristicResult(m, n, k, dtype, dtype, dtype)
+    hier_config = make_hierarchical_config(selector)
+    tritonblas.matmul_lt(
+        A,
+        B,
+        C,
+        selector,
+        enable_streamk=False,
+        workgroup_schedule="hierarchical",
+        hierarchical_config=hier_config,
     )
 
     torch.testing.assert_close(C, torch.matmul(A, B), atol=1, rtol=1)

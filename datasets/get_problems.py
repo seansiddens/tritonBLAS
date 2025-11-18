@@ -14,8 +14,7 @@ DEFAULT_TRANSA = "N"
 DEFAULT_TRANSB = "T"
 
 BF16_BYTES = 2
-TWO_GB_BYTES = 2_147_483_648
-MAX_ELEMENTS_PER_MATRIX = TWO_GB_BYTES // BF16_BYTES  # 1,073,741,824 elements
+BYTES_PER_GB = 1024**3
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         help="Optional random seed for reproducible sampling",
+    )
+    parser.add_argument(
+        "--gb",
+        type=float,
+        default=2.0,
+        help="Maximum bf16 operand size in gigabytes (default: 2)",
     )
     return parser.parse_args()
 
@@ -80,12 +85,19 @@ def filter_batch_count(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return filtered
 
 
+def max_elements_from_gb(gigabytes: float) -> int:
+    if gigabytes <= 0:
+        raise ValueError("--gb must be positive")
+    bytes_limit = gigabytes * BYTES_PER_GB
+    return int(bytes_limit // BF16_BYTES)
+
+
 def filter_category(rows: list[dict[str, str]], category: str) -> list[dict[str, str]]:
     category_lower = category.lower()
     return [row for row in rows if row.get("category", "").lower() == category_lower]
 
 
-def filter_matrix_size(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def filter_matrix_size(rows: list[dict[str, str]], max_elements: int) -> list[dict[str, str]]:
     filtered: list[dict[str, str]] = []
     for row in rows:
         try:
@@ -96,9 +108,9 @@ def filter_matrix_size(rows: list[dict[str, str]]) -> list[dict[str, str]]:
             raise ValueError(f"Unable to parse m/n/k as integers for row: {row}") from exc
 
         if (
-            m * k < MAX_ELEMENTS_PER_MATRIX
-            and k * n < MAX_ELEMENTS_PER_MATRIX
-            and m * n < MAX_ELEMENTS_PER_MATRIX
+            m * k < max_elements
+            and k * n < max_elements
+            and m * n < max_elements
         ):
             filtered.append(row)
     return filtered
@@ -146,6 +158,7 @@ def build_problem(row: dict[str, str]) -> dict[str, int | str]:
         "m": m,
         "n": n,
         "k": k,
+        "category": row.get("category", "unknown"),
     }
 
 
@@ -159,19 +172,30 @@ def format_yaml(problems: list[dict[str, int | str]]) -> str:
         lines.append(f"  m: {problem['m']}")
         lines.append(f"  n: {problem['n']}")
         lines.append(f"  k: {problem['k']}")
+        lines.append(f"  category: {problem.get('category', 'unknown')}")
     return "\n".join(lines) + "\n"
 
 
+def format_gb_suffix(gb_value: float) -> str:
+    value_str = f"{gb_value:g}"
+    sanitized = value_str.replace(".", "p")
+    return f"{sanitized}gb"
+
+
 def determine_output_path(
-    script_dir: Path, category: str | None, count: int, override: str | None
+    script_dir: Path,
+    category: str | None,
+    count: int,
+    override: str | None,
+    gb_suffix: str,
 ) -> Path:
     if override:
         return script_dir / override
     if category:
         safe_category = "".join(ch if ch.isalnum() else "_" for ch in category.lower()).strip("_")
-        filename = f"{safe_category or 'problems'}_{count}.yaml"
+        filename = f"{safe_category or 'problems'}_{count}_{gb_suffix}.yaml"
     else:
-        filename = f"all_categories_{count}.yaml"
+        filename = f"all_categories_{count}_{gb_suffix}.yaml"
     return script_dir / filename
 
 
@@ -184,9 +208,16 @@ def main() -> None:
     if not rows:
         raise SystemExit("No rows with batch_count == 1 found in the CSV.")
 
-    rows = filter_matrix_size(rows)
+    try:
+        max_elements = max_elements_from_gb(args.gb)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+
+    rows = filter_matrix_size(rows, max_elements)
     if not rows:
-        raise SystemExit("No rows satisfy bf16 matrix < 2GB constraints after batch filtering.")
+        raise SystemExit(
+            f"No rows satisfy bf16 matrix < {args.gb}GB constraints after batch filtering."
+        )
 
     rows = filter_min_grid(rows, 5)
     if not rows:
@@ -209,7 +240,10 @@ def main() -> None:
     problems = [build_problem(row) for row in selected]
 
     script_dir = Path(__file__).resolve().parent
-    output_path = determine_output_path(script_dir, args.category, args.count, args.output)
+    gb_suffix = format_gb_suffix(args.gb)
+    output_path = determine_output_path(
+        script_dir, args.category, args.count, args.output, gb_suffix
+    )
     contents = format_yaml(problems)
     output_path.write_text(contents)
     print(f"Wrote {len(problems)} problems to {output_path}")

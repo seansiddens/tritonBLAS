@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -38,7 +39,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Optional plot title (defaults to CSV stem)",
     )
+    parser.add_argument(
+        "--category",
+        type=str,
+        help="Only plot rows matching this category value",
+    )
     return parser.parse_args()
+
+
+def slugify(value: str) -> str:
+    """Return a filesystem-friendly version of value."""
+    slug = re.sub(r"[^0-9A-Za-z._-]+", "_", value).strip("_")
+    return slug or "category"
 
 
 def dtype_num_bytes(dtype_str: str) -> int:
@@ -56,7 +68,9 @@ def arithmetic_intensity(m: int, n: int, k: int, bytes_per_elem: int) -> float:
     return flops / bytes_moved
 
 
-def load_points(csv_path: Path) -> tuple[dict[str, tuple[list[float], list[float]]], int]:
+def load_points(
+    csv_path: Path, category_filter: str | None = None
+) -> tuple[dict[str, tuple[list[float], list[float]]], int]:
     points = {
         "default": ([], []),
         "shuffled": ([], []),
@@ -64,14 +78,19 @@ def load_points(csv_path: Path) -> tuple[dict[str, tuple[list[float], list[float
     total_rows = 0
     with csv_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
+        if category_filter and "category" not in (reader.fieldnames or []):
+            raise ValueError("CSV missing required 'category' column for filtering.")
         for row in reader:
+            if category_filter and row.get("category") != category_filter:
+                continue
             total_rows += 1
             try:
                 m = int(row["m"])
                 n = int(row["n"])
                 k = int(row["k"])
                 in_dtype = row["in_dtype"]
-                default_gflops = float(row.get("default_gflops", "nan"))
+                comparator_gflops_str = row.get("default_gflops") or row.get("comparator_gflops")
+                default_gflops = float(comparator_gflops_str) if comparator_gflops_str else float("nan")
                 shuffled_gflops = float(row.get("shuffled_gflops", "nan"))
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"Invalid row encountered: {row}") from exc
@@ -90,10 +109,15 @@ def load_points(csv_path: Path) -> tuple[dict[str, tuple[list[float], list[float
     return points, total_rows
 
 
-def plot(points: dict[str, tuple[list[float], list[float]]], title: str, output_path: Path) -> None:
+def plot(
+    points: dict[str, tuple[list[float], list[float]]],
+    title: str,
+    output_path: Path,
+    axis_points: dict[str, tuple[list[float], list[float]]] | None = None,
+) -> None:
     plt.figure(figsize=(10, 6))
     colors = {"default": "tab:blue", "shuffled": "tab:orange"}
-    labels = {"default": "baseline", "shuffled": "random"}
+    labels = {"default": "MALL aware", "shuffled": "random"}
 
     for label, (x_vals, y_vals) in points.items():
         if not x_vals:
@@ -112,6 +136,13 @@ def plot(points: dict[str, tuple[list[float], list[float]]], title: str, output_
     plt.ylabel("TFLOP/s")
     plt.title(title)
     plt.legend()
+    source = axis_points or points
+    flat_x = [x for vals in source.values() for x in vals[0]]
+    flat_y = [y for vals in source.values() for y in vals[1]]
+    if flat_x:
+        plt.xlim(min(flat_x), max(flat_x))
+    if flat_y:
+        plt.ylim(min(flat_y), max(flat_y))
     plt.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
     plt.tight_layout()
     plt.savefig(output_path)
@@ -124,16 +155,31 @@ def main() -> None:
     if not csv_path.is_file():
         raise SystemExit(f"CSV file not found: {csv_path}")
 
-    output_path = args.output or Path(f"{csv_path.stem}_ai_scatter.png")
+    category_filter = args.category
+    if args.output:
+        output_path = args.output
+    else:
+        suffix = f"_{slugify(category_filter)}" if category_filter else ""
+        output_path = Path(f"{csv_path.stem}{suffix}_ai_scatter.png")
 
-    points, total_rows = load_points(csv_path)
+    full_points, total_rows_all = load_points(csv_path, None)
+    if category_filter:
+        points, _ = load_points(csv_path, category_filter)
+        axis_points = full_points
+    else:
+        points = full_points
+        axis_points = None
+
     if not any(points[label][0] for label in points):
         raise SystemExit("No valid data points to plot.")
 
-    default_title = f"Random vs Baseline L2 Grid Schedules ({total_rows} problems)"
+    if category_filter:
+        default_title = f"Random vs Mall Aware Grid Schedules - {category_filter}"
+    else:
+        default_title = "Random vs Mall Aware Grid Schedules"
     title = args.title or default_title
 
-    plot(points, title, output_path)
+    plot(points, title, output_path, axis_points=axis_points)
 
 
 if __name__ == "__main__":
