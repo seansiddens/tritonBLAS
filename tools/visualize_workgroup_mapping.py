@@ -80,7 +80,7 @@ def visualize_mapping(args):
         f"GROUP_SIZE_M={config['GROUP_SIZE_M']}, NUM_XCDS={config['NUM_XCDS']}, CHUNK_SIZE={chunk_size}, NUM_L2_TILES={config['NUM_L2_TILES']} | "
         f"schedule={config['workgroup_schedule']}"
     )
-    if config["workgroup_schedule"] == "random":
+    if config["workgroup_schedule"] in ("random", "workgroup_shuffle"):
         message += f", LCG_A={config['LCG_A']}, LCG_C={config['LCG_C']}"
     elif config["workgroup_schedule"] == "hierarchical":
         message += (
@@ -142,7 +142,7 @@ def main():
         "--workgroup-schedule",
         type=str,
         default="default",
-        choices=["default", "random", "hierarchical"],
+        choices=["default", "random", "workgroup_shuffle", "hierarchical"],
         help="Workgroup scheduling strategy to visualize.",
     )
     parser.add_argument(

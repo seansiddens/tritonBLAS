@@ -7,9 +7,12 @@ import math
 from dataclasses import dataclass
 from .internal.persistent_matmul import (
     persistent_matmul,
+    persistent_matmul_baseline,
     persistent_matmul_shuffled,
+    persistent_matmul_workgroup_shuffled,
     persistent_matmul_debug_map,
     persistent_matmul_debug_map_shuffled,
+    persistent_matmul_debug_map_workgroup_shuffled,
     persistent_matmul_hierarchical,
     persistent_matmul_debug_map_hierarchical,
 )
@@ -125,6 +128,16 @@ def choose_lcg_shuffle_params(
     return _choose_lcg_params(num_tiles, seed=seed, rng=rng)
 
 
+def _choose_lcg_params_allow_single_tile(
+    num_tiles: int,
+    seed: Optional[int] = None,
+    rng: Optional[random.Random] = None,
+) -> Tuple[int, int]:
+    if num_tiles <= 1:
+        return 0, 0
+    return _choose_lcg_params(num_tiles, seed=seed, rng=rng)
+
+
 def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -187,6 +200,9 @@ def persistent_matmul_lt(
     if workgroup_schedule == "default":
         kernel = persistent_matmul
         kernel_kwargs.update({"GROUP_SIZE_M": gsize_m})
+    elif workgroup_schedule == "baseline":
+        kernel = persistent_matmul_baseline
+        kernel_kwargs.update({"GROUP_SIZE_M": gsize_m})
     elif workgroup_schedule == "random":
         if num_l2_tiles <= 1:
             raise ValueError(
@@ -195,6 +211,10 @@ def persistent_matmul_lt(
         a_lcg, c_lcg = _choose_lcg_params(num_l2_tiles, seed=shuffle_seed)
         kernel = persistent_matmul_shuffled
         kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
+    elif workgroup_schedule == "workgroup_shuffle":
+        a_lcg, c_lcg = _choose_lcg_params_allow_single_tile(total_tiles, seed=shuffle_seed)
+        kernel = persistent_matmul_workgroup_shuffled
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
     elif workgroup_schedule == "hierarchical":
         if hierarchical_config is None:
             raise ValueError("hierarchical_config is required when workgroup_schedule='hierarchical'.")
@@ -202,7 +222,7 @@ def persistent_matmul_lt(
         kernel_kwargs.update(hierarchical_config.to_kernel_kwargs())
     else:
         raise ValueError(
-            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'random', or 'hierarchical'."
+            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'baseline', 'random', 'workgroup_shuffle', or 'hierarchical'."
         )
 
     kernel[(grids,)](
@@ -376,6 +396,12 @@ def compute_persistent_workgroup_map(
         kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
         config["LCG_A"] = a_lcg
         config["LCG_C"] = c_lcg
+    elif workgroup_schedule == "workgroup_shuffle":
+        a_lcg, c_lcg = _choose_lcg_params_allow_single_tile(total_tiles, seed=shuffle_seed)
+        kernel = persistent_matmul_debug_map_workgroup_shuffled
+        kernel_kwargs.update({"LCG_A": a_lcg, "LCG_C": c_lcg, "GROUP_SIZE_M": gsize_m})
+        config["LCG_A"] = a_lcg
+        config["LCG_C"] = c_lcg
     elif workgroup_schedule == "hierarchical":
         if hierarchical_config is None:
             raise ValueError("hierarchical_config is required when workgroup_schedule='hierarchical'.")
@@ -384,7 +410,7 @@ def compute_persistent_workgroup_map(
         config.update(hierarchical_config.to_kernel_kwargs())
     else:
         raise ValueError(
-            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'random', or 'hierarchical'."
+            f"Unknown workgroup_schedule '{workgroup_schedule}'. Expected 'default', 'random', 'workgroup_shuffle', or 'hierarchical'."
         )
 
     kernel[(grids,)](**kernel_kwargs)

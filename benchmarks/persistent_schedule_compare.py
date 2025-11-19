@@ -156,11 +156,14 @@ def main():
         "comparator",
         "comparator_us",
         "comparator_gflops",
+        "workgroup_shuffle_us",
+        "workgroup_shuffle_gflops",
         "shuffled_us",
         "shuffled_gflops",
     ]
     rows = []
-    comparisons: list[tuple[str, float, float]] = []
+    random_comparisons: list[tuple[str, float, float]] = []
+    workgroup_comparisons: list[tuple[str, float, float]] = []
     errors: list[str] = []
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -213,6 +216,8 @@ def main():
                 comparator_schedule = "hierarchical" if use_hierarchical else "default"
                 comparator_cfg = hierarchical_config if use_hierarchical else None
 
+                problem_flops = 2 * m * n * k * 1e-9
+
                 C_comp = torch.zeros((m, n), device="cuda", dtype=out_dtype)
                 comparator_ms = matmul_time(
                     A,
@@ -223,7 +228,17 @@ def main():
                     None,
                     comparator_cfg,
                 )
-                comparator_gflops = 2 * m * n * k * 1e-9 / (comparator_ms * 1e-3)
+                comparator_gflops = problem_flops / (comparator_ms * 1e-3)
+
+                C_workgroup = torch.zeros((m, n), device="cuda", dtype=out_dtype)
+                workgroup_shuffle_ms = matmul_time(
+                    A, B, C_workgroup, selector, "workgroup_shuffle", args.shuffle_seed, None
+                )
+                workgroup_shuffle_gflops = (
+                    problem_flops / (workgroup_shuffle_ms * 1e-3)
+                    if workgroup_shuffle_ms > 0
+                    else float("nan")
+                )
 
                 if num_l2_tiles <= 1:
                     raise ValueError(
@@ -234,7 +249,7 @@ def main():
                     A, B, C_random, selector, "random", args.shuffle_seed, None
                 )
                 shuffled_gflops = (
-                    2 * m * n * k * 1e-9 / (shuffled_ms * 1e-3) if shuffled_ms > 0 else float("nan")
+                    problem_flops / (shuffled_ms * 1e-3) if shuffled_ms > 0 else float("nan")
                 )
 
                 row = {
@@ -254,19 +269,26 @@ def main():
                     "comparator": comparator_label,
                     "comparator_us": comparator_ms / 1000,
                     "comparator_gflops": comparator_gflops,
+                    "workgroup_shuffle_us": workgroup_shuffle_ms / 1000,
+                    "workgroup_shuffle_gflops": workgroup_shuffle_gflops,
                     "shuffled_us": shuffled_ms / 1000,
                     "shuffled_gflops": shuffled_gflops,
                 }
                 writer.writerow(row)
                 f.flush()
                 rows.append(row)
+                if not math.isnan(workgroup_shuffle_gflops):
+                    workgroup_comparisons.append(
+                        (comparator_label, comparator_gflops, workgroup_shuffle_gflops)
+                    )
                 if not math.isnan(shuffled_gflops):
-                    comparisons.append((comparator_label, comparator_gflops, shuffled_gflops))
+                    random_comparisons.append((comparator_label, comparator_gflops, shuffled_gflops))
 
                 if args.verbose:
                     msg = (
                         f"[{idx+1}/{len(problems)}] category={category}, m={m}, n={n}, k={k}, "
                         f"in={in_dtype}, out={out_dtype}, comparator({comparator_label})={comparator_gflops:.2f} GF/s, "
+                        f"workgroup_shuffle={workgroup_shuffle_gflops:.2f} GF/s, "
                         f"shuffled={shuffled_gflops:.2f} GF/s"
                     )
                     print(msg)
@@ -288,27 +310,31 @@ def main():
     if errors:
         print(f"{len(errors)} cases failed and were skipped; see messages above.")
 
-    if comparisons:
-        num_cases = len(comparisons)
-        comparator_better = sum(1 for _, comp, shuf in comparisons if comp > shuf)
-        shuffled_better = sum(1 for _, comp, shuf in comparisons if comp < shuf)
-        pct_diffs = [((comp - shuf) / shuf) * 100 for _, comp, shuf in comparisons if shuf > 0]
+    def print_comparison_summary(name: str, data: list[tuple[str, float, float]]):
+        if not data:
+            print(f"Summary: no comparable cases with {name} schedule were collected.")
+            return
+        num_cases = len(data)
+        comparator_better = sum(1 for _, comp, shuf in data if comp > shuf)
+        shuffled_better = sum(1 for _, comp, shuf in data if comp < shuf)
+        pct_diffs = [((comp - shuf) / shuf) * 100 for _, comp, shuf in data if shuf > 0]
         avg_pct_diff = sum(pct_diffs) / len(pct_diffs) if pct_diffs else float("nan")
         mode_counts: dict[str, int] = {"baseline": 0, "hierarchical": 0}
-        for mode, _, _ in comparisons:
+        for mode, _, _ in data:
             mode_counts[mode] = mode_counts.get(mode, 0) + 1
         print(
-            "Summary (comparator vs shuffled, GFLOP/s): "
+            f"Summary (comparator vs {name}, GFLOP/s): "
             f"avg delta {avg_pct_diff:+.2f}% over {num_cases} comparable cases; "
             f"comparator faster in {comparator_better} ({comparator_better / num_cases * 100:.1f}%), "
-            f"shuffled faster in {shuffled_better} ({shuffled_better / num_cases * 100:.1f}%)."
+            f"{name} faster in {shuffled_better} ({shuffled_better / num_cases * 100:.1f}%)."
         )
         print(
             f"Comparisons by mode: baseline={mode_counts.get('baseline',0)}, "
             f"hierarchical={mode_counts.get('hierarchical',0)}"
         )
-    else:
-        print("Summary: no comparable cases with shuffled schedule were collected.")
+
+    print_comparison_summary("workgroup_shuffle", workgroup_comparisons)
+    print_comparison_summary("random", random_comparisons)
 
 
 if __name__ == "__main__":
