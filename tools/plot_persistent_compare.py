@@ -181,7 +181,11 @@ def plot(
 ) -> None:
     plt.figure(figsize=(10, 6))
     colors = {"mall": "tab:blue", "random": "tab:red", "l2": "tab:orange"}
-    labels = {"mall": "L2 + MALL aware", "random": "random", "l2": "L2 aware"}
+    labels = {
+        "mall": "L2 Aware, MALL Aware",
+        "random": "L2 Random, MALL Random",
+        "l2": "L2 Aware, MALL Random",
+    }
     dim_series = dim_series or set()
     ordered_series = series or list(points.keys())
     for label in ordered_series:
