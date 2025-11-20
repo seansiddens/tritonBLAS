@@ -372,7 +372,10 @@ def plot_bar_chart(stats: dict, title: str, output_path: Path) -> None:
     offsets = [(-width), 0, width]
     plt.figure(figsize=(max(8, num_groups * 0.8), 6))
     colors = {"mall": "tab:blue", "l2": "tab:orange"}
-    labels_map = {"mall": "L2 + MALL aware", "l2": "L2 aware"}
+    labels_map = {
+        "mall": "L2 Aware, MALL Aware",
+        "l2": "L2 Aware, MALL Random",
+    }
 
     for idx, strategy in enumerate(strategies):
         bar_positions = [pos + offsets[idx] for pos in indices]
