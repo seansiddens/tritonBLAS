@@ -6,7 +6,7 @@ import time
 import math
 from dataclasses import dataclass
 from .internal.persistent_matmul import (
-    persistent_matmul,
+    persistent_matmul_chunked,
     persistent_matmul_baseline,
     persistent_matmul_shuffled,
     persistent_matmul_workgroup_shuffled,
@@ -198,7 +198,7 @@ def persistent_matmul_lt(
     )
 
     if workgroup_schedule == "default":
-        kernel = persistent_matmul
+        kernel = persistent_matmul_chunked
         kernel_kwargs.update({"GROUP_SIZE_M": gsize_m})
     elif workgroup_schedule == "baseline":
         kernel = persistent_matmul_baseline

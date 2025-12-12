@@ -220,7 +220,7 @@ def transform_depth3(
 
 
 @triton.jit()
-def persistent_matmul(
+def persistent_matmul_chunked(
     A,
     B,
     C,
@@ -266,16 +266,14 @@ def persistent_matmul(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
+
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        swizzled_pid = swizzle_tile_l2(
-            tile_id,
-            num_pid_m,
-            num_pid_n,
-            TileDimY=GROUP_SIZE_M,
-            TileDimX=GROUP_SIZE_M,
-        )
-        pid_m = swizzled_pid // num_pid_n
-        pid_n = swizzled_pid % num_pid_n
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
