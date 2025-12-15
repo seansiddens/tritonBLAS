@@ -245,8 +245,8 @@ def main():
     out_dtype = torch.float16
     transA = "N"
     transB = "N"
-    warmup = 20
-    rep = 500
+    warmup = 10
+    rep = 10
 
     kernel_a_inputs = generate_matmul_inputs(
         m, n, k, in_dtype, out_dtype, transA, transB, "randn"
@@ -353,7 +353,7 @@ def main():
     # Run fused_matmul
     fused_c0, fused_c1 = tritonblas.fused_matmul(
         test_a, test_b0, test_c0, test_b1, test_c1, 
-        kernel_a_selector, kernel_b_selector
+        kernel_a_selector, kernel_b_selector, verbose=True
     )
     
     # Compute PyTorch baseline
@@ -400,23 +400,23 @@ def main():
         max_diff = (fused_c1.to(torch.float32) - torch_c1.to(torch.float32)).abs().max()
         print(f"   Max difference: {max_diff}")
     
-    # Benchmark fused_matmul
-    def fused_matmul_bench():
-        # test_c0.zero_()
-        # test_c1.zero_()
-        tritonblas.fused_matmul(
-            test_a, test_b0, test_c0, test_b1, test_c1,
-            kernel_a_selector, kernel_b_selector
-        )
-        return test_c1
+    # # Benchmark fused_matmul
+    # def fused_matmul_bench():
+    #     # test_c0.zero_()
+    #     # test_c1.zero_()
+    #     tritonblas.fused_matmul(
+    #         test_a, test_b0, test_c0, test_b1, test_c1,
+    #         kernel_a_selector, kernel_b_selector
+    #     )
+    #     return test_c1
     
-    fused_ms = triton.testing.do_bench(fused_matmul_bench, warmup=warmup, rep=rep)
-    # Total FLOPS for two GEMMs: 2*m*n*k (Kernel A) + 2*m*p*n (Kernel B)
-    total_flops = 2 * m * n * k + 2 * m * p * n
-    fused_perf = total_flops * 1e-12 / (fused_ms * 1e-3)
+    # fused_ms = triton.testing.do_bench(fused_matmul_bench, warmup=warmup, rep=rep)
+    # # Total FLOPS for two GEMMs: 2*m*n*k (Kernel A) + 2*m*p*n (Kernel B)
+    # total_flops = 2 * m * n * k + 2 * m * p * n
+    # fused_perf = total_flops * 1e-12 / (fused_ms * 1e-3)
     
-    print(f"\n\nFused GEMM Performance: \nperf={fused_perf:.2f}(TFLOPs), ms={fused_ms:.3f}")
-    print(f"Speedup over sequential: {sequential_ms / fused_ms:.2f}x")
+    # print(f"\n\nFused GEMM Performance: \nperf={fused_perf:.2f}(TFLOPs), ms={fused_ms:.3f}")
+    # print(f"Speedup over sequential: {sequential_ms / fused_ms:.2f}x")
 
 
 

@@ -263,7 +263,8 @@ def fused_matmul(
     b1: torch.Tensor,
     c1: torch.Tensor,
     kernel_alpha_selector,
-    kernel_beta_selector
+    kernel_beta_selector,
+    verbose=False
 ):
     """
     c0 = a @ b0
@@ -302,7 +303,11 @@ def fused_matmul(
     beta_total_tiles = beta_total_blocks_m * beta_total_blocks_n
     beta_total_programs = beta_total_tiles
     beta_even_k = N % BETA_BLK_K == 0  # For BETA, K dimension is N (from C0)
-    # print(f"alpha_kernel_programs: {alpha_total_programs}, beta_kernel_programs: {beta_total_programs}")
+    if verbose:
+        print(f"alpha_total_tiles: {alpha_total_tiles}, beta_total_tiles: {beta_total_tiles}")
+        print(f"alpha_pid_m: {alpha_total_blocks_m}, alpha_pid_n: {alpha_total_blocks_n}")
+        print(f"beta_pid_m: {beta_total_blocks_m}, beta_pid_n: {beta_total_blocks_n}")
+        print(f"alpha_kernel_programs: {alpha_total_programs}, beta_kernel_programs: {beta_total_programs}")
     
     # EVEN_K is used by both ALPHA (for K dimension) and BETA (for N dimension)
     # Since the kernel only accepts one EVEN_K, we use the more restrictive value
@@ -318,15 +323,35 @@ def fused_matmul(
     CACHE_MODIFIER_B = None
     grids = alpha_total_programs + beta_total_programs
     # print(f"fused_kernel_programs: {grids}")
-    
+    if verbose:
+        print(f"fused_kernel_programs: {grids}")
     # Set chunk size to same area as L2 tiles
     num_xcds = 8
     chunk_size = ALPHA_GSIZE_M * ALPHA_GSIZE_M
     chunk_size = min(chunk_size, grids // num_xcds)
-    
+
+    # Debug flag: enable XCD mapping capture
+    show_map = True
+
     # Initialize locks for synchronization
     locks = torch.zeros(alpha_total_tiles, device="cuda", dtype=torch.int32)
-    
+
+    # Allocate XCD maps if needed
+    if show_map:
+        alpha_xcd_map = torch.empty(
+            (alpha_total_blocks_m, alpha_total_blocks_n),
+            device="cuda",
+            dtype=torch.int8,
+        )
+        beta_xcd_map = torch.empty(
+            (beta_total_blocks_m, beta_total_blocks_n),
+            device="cuda",
+            dtype=torch.int8,
+        )
+    else:
+        alpha_xcd_map = torch.empty(0, device="cuda", dtype=torch.int8)
+        beta_xcd_map = torch.empty(0, device="cuda", dtype=torch.int8)
+
     # Invoke the fused kernel
     fused_persistent_matmul[(grids,)](
         a,
@@ -335,6 +360,8 @@ def fused_matmul(
         b1,
         c1,
         locks,
+        alpha_xcd_map,
+        beta_xcd_map,
         None,  # A_scale_ptr (TODO: support quantization)
         None,  # B_scale_ptr (TODO: support quantization)
         None,  # bias_ptr (TODO: enable bias)
@@ -370,8 +397,20 @@ def fused_matmul(
         waves_per_eu=waves_per_eu,
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
+        SHOW_MAP=show_map,
     )
-    
+
+    if show_map:
+        def _print_xcd_map(name: str, m: torch.Tensor):
+            print(f"{name} (shape={tuple(m.shape)}):")
+            # Expect int8 in range [0, 7]
+            for i in range(m.shape[0]):
+                row_vals = " ".join(str(int(v)) for v in m[i].tolist())
+                print(row_vals)
+
+        _print_xcd_map("alpha_xcd_map", alpha_xcd_map)
+        _print_xcd_map("beta_xcd_map", beta_xcd_map)
+
     return c0, c1
 
 

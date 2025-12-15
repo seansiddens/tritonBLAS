@@ -4,6 +4,18 @@ import torch
 
 from .stages.indexing.pid_transforms import chiplet_transform_chunked, chiplet_transform
 
+@triton.jit
+def read_xcd_id():
+    xcd_id = tl.inline_asm_elementwise(
+        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID)",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+    return xcd_id
+
 @triton.jit()
 def fused_persistent_matmul(
     A,
@@ -12,6 +24,8 @@ def fused_persistent_matmul(
     B1,
     C1,
     locks,
+    alpha_xcd_map,
+    beta_xcd_map,
     A_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     B_scale_ptr,  # Optional: None for fp16/bf16, pointer for int8/fp8
     bias_ptr,
@@ -42,10 +56,13 @@ def fused_persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
+    SHOW_MAP: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
 ):
 
     pid = tl.program_id(0)
+    xcd_id = read_xcd_id()
+
     # if NUM_XCDS != 1:
     #     pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
     pid = chiplet_transform(pid, NUM_SMS, NUM_XCDS)
@@ -53,6 +70,17 @@ def fused_persistent_matmul(
     alpha_num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     alpha_num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     alpha_total_tiles = alpha_num_pid_m * alpha_num_pid_n
+
+    beta_num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    beta_num_pid_n = tl.cdiv(P, BLOCK_SIZE_N)
+    beta_total_tiles = beta_num_pid_m * beta_num_pid_n
+    total_pids = alpha_total_tiles + beta_total_tiles
+
+    alpha_pids_per_xcd = alpha_total_tiles // NUM_XCDS # 32
+    beta_pids_per_xcd = beta_total_tiles // NUM_XCDS # 4
+    total_pids_per_xcd = alpha_pids_per_xcd + beta_pids_per_xcd # 36
+
+    pos_in_xcd = pid % total_pids_per_xcd # This pid's invocation pos in the xcd.
 
     tl.assume(stride_am > 0)
     tl.assume(stride_ak > 0)
@@ -69,7 +97,10 @@ def fused_persistent_matmul(
 
 
     # GEMM ALPHA
-    if pid < alpha_total_tiles:
+    # if pid < alpha_total_tiles:
+    if pos_in_xcd < alpha_pids_per_xcd:
+        # Remap alpha workgroups to [0, 256]
+        pid = alpha_pids_per_xcd * xcd_id + pos_in_xcd
         for tile_id in range(pid, alpha_total_tiles, NUM_SMS):
             # num_pid_in_group = GROUP_SIZE_M * alpha_num_pid_n
             # group_id = tile_id // num_pid_in_group
@@ -81,6 +112,11 @@ def fused_persistent_matmul(
             pid_n = tile_id % alpha_num_pid_n
             tl.assume(pid_m >= 0)
             tl.assume(pid_n >= 0)
+
+            if SHOW_MAP:
+                # alpha_xcd_map has shape (alpha_num_pid_m, alpha_num_pid_n)
+                offset = pid_m * alpha_num_pid_n + pid_n
+                tl.store(alpha_xcd_map + offset, xcd_id.to(tl.int8))
 
             rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
             rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -156,23 +192,22 @@ def fused_persistent_matmul(
     else:
         # BETA GEMM
         # Calculate beta workgroup ID and which tiles to wait on
-        beta_pid = pid - alpha_total_tiles
-        beta_num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-        beta_num_pid_n = tl.cdiv(P, BLOCK_SIZE_N)
-        beta_total_tiles = beta_num_pid_m * beta_num_pid_n
+        # These PIDs are for the beta kernel, so they are [32, 33, 34, 35, 64, 65, 66, 67...]
+        # beta_pid = pid - alpha_total_tiles
+        alpha_pids_per_beta_pid = alpha_total_tiles // beta_total_tiles # 256 / 32 = 8
+        pid = beta_pids_per_xcd * xcd_id + (pos_in_xcd - alpha_pids_per_xcd)
         
         # Process tiles for this BETA workgroup (persistent pattern)
-        for tile_id in range(beta_pid, beta_total_tiles, NUM_SMS):
-            # num_pid_in_group = GROUP_SIZE_M * beta_num_pid_n
-            # group_id = tile_id // num_pid_in_group
-            # first_pid_m = group_id * GROUP_SIZE_M
-            # group_size_m = min(beta_num_pid_m - first_pid_m, GROUP_SIZE_M)
-            # pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            # pid_n = (tile_id % num_pid_in_group) // group_size_m
+        for tile_id in range(pid, beta_total_tiles, NUM_SMS):
             pid_m = tile_id // beta_num_pid_n
             pid_n = tile_id % beta_num_pid_n
             tl.assume(pid_m >= 0)
             tl.assume(pid_n >= 0)
+
+            if SHOW_MAP:
+                # beta_xcd_map has shape (beta_num_pid_m, beta_num_pid_n)
+                offset = pid_m * beta_num_pid_n + pid_n
+                tl.store(beta_xcd_map + offset, xcd_id.to(tl.int8))
             
             # Wait for all ALPHA tiles in row pid_m that this BETA tile depends on
             # A BETA tile at (pid_m, pid_n) needs all C0 tiles in row pid_m to compute C1
