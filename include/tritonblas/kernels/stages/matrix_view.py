@@ -92,14 +92,14 @@ class InputView:
         return ptrs, mask
     
     @triton.jit
-    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
+    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = None):
         """
         Load a tile from this matrix.
         
         Args:
             tile: Tile with coordinates and shape
             boundary: If True, apply boundary masking for partial tiles
-            cache_modifier: Cache modifier for load instruction
+            cache_modifier: Cache modifier for load instruction (default: None = compiler default)
         
         Returns:
             Loaded tile data [BLOCK_ROW, BLOCK_COL]
@@ -301,7 +301,7 @@ class OutputView:
         tl.store(ptrs, result, mask=mask)
     
     @triton.jit
-    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
+    def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = None):
         """
         Load a tile from this matrix (for read-modify-write patterns).
         """
